@@ -1695,13 +1695,7 @@ async function executeAction(action) {
 
 // Add a message to the FIFO queue
 function addToTelegramQueue(message) {
-  // #region agent log - H-A: track queue additions
-  fetch('http://127.0.0.1:7245/ingest/fafa93bc-385f-4735-aa3c-e6b9a7d9cc4c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'renderer.js:1672',message:'addToTelegramQueue called',data:{queueLengthBefore:telegramMessageQueue.length,messageContent:message?.content?.substring(0,20)},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   telegramMessageQueue.push(message);
-  // #region agent log - H-A: verify addition
-  fetch('http://127.0.0.1:7245/ingest/fafa93bc-385f-4735-aa3c-e6b9a7d9cc4c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'renderer.js:1673',message:'addToTelegramQueue complete',data:{queueLengthAfter:telegramMessageQueue.length},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   showToast(`📥 Message queued (${telegramMessageQueue.length} pending)`, 'info');
 }
 
@@ -1808,22 +1802,12 @@ function completeScenarioExecution() {
     // Only reset processing flag
     isProcessingTelegramQueue = false;
 
-    // #region agent log - H-B,C: test completeScenarioExecution queue handling
-    fetch('http://127.0.0.1:7245/ingest/fafa93bc-385f-4735-aa3c-e6b9a7d9cc4c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'renderer.js:1780',message:'completeScenarioExecution - checking queue',data:{queueLength:telegramMessageQueue.length,scenarioName:scenario.name,isTelegramScenario:isTelegramScenario,telegramLoopTrigger:!!scenario.telegramLoopTrigger,isProcessingTelegramQueue:isProcessingTelegramQueue},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
-
     // If there are still messages in the queue, shift and trigger the scenario again
     if (telegramMessageQueue.length > 0) {
       console.log('[DEBUG] Queue has messages, shifting and triggering again');
       // SHIFT message out of queue before triggering
       const nextMessage = telegramMessageQueue.shift();
-      // #region agent log - H-B: log shifted message
-      fetch('http://127.0.0.1:7245/ingest/fafa93bc-385f-4735-aa3c-e6b9a7d9cc4c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'renderer.js:1786',message:'shifting message from queue',data:{remainingQueue:telegramMessageQueue.length,messageContent:nextMessage?.content?.substring(0,20)},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       setTimeout(async () => {
-        // #region agent log - H-B: calling autoTriggerTelegramScenario from completeScenarioExecution
-        fetch('http://127.0.0.1:7245/ingest/fafa93bc-385f-4735-aa3c-e6b9a7d9cc4c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'renderer.js:1799',message:'calling autoTriggerTelegramScenario from completeScenarioExecution',data:{messageContent:nextMessage?.content?.substring(0,20)},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         await autoTriggerTelegramScenario(nextMessage);
       }, 500);
     }
@@ -4185,9 +4169,6 @@ function stopSequenceScenario() {
 
 // Auto-trigger telegram-enabled scenario when new message arrives
 async function autoTriggerTelegramScenario(message) {
-  // #region agent log - H-B,C: autoTriggerTelegramScenario entry
-  fetch('http://127.0.0.1:7245/ingest/fafa93bc-385f-4735-aa3c-e6b9a7d9cc4c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'renderer.js:4164',message:'autoTriggerTelegramScenario entry',data:{messageContent:message?.content?.substring(0,20),runningScenarioId:runningScenarioId,telegramRunningLoopTrigger:telegramRunningLoopTrigger,telegramSequenceRunning:telegramSequenceRunning,telegramMessageQueueLength:telegramMessageQueue.length},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'B'})}).catch(()=>{});
-  // #endregion
   console.log('[DEBUG-TEL-2] autoTriggerTelegramScenario called');
   console.log('[DEBUG-TEL-2] message:', message?.content);
   console.log('[DEBUG-TEL-2] runningScenarioId:', runningScenarioId);
@@ -4287,10 +4268,6 @@ async function autoTriggerTelegramScenario(message) {
     console.log('[DEBUG-TEL-2] QUEUE-BEFORE:', telegramMessageQueue.length, 'messages');
     showToast(`${telegramScenario.name} - Tin nhan vao hang cho...`, 'info');
 
-    // #region agent log - H-A: test if message added to queue
-    fetch('http://127.0.0.1:7245/ingest/fafa93bc-385f-4735-aa3c-e6b9a7d9cc4c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'renderer.js:4243',message:'CASE2 executed - should add to queue',data:{queueLengthBefore:telegramMessageQueue.length,scenarioId:telegramScenario.id,scenarioName:telegramScenario.name},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
-
     // Copy message to clipboard
     currentTelegramMessage = message;
     try {
@@ -4300,11 +4277,7 @@ async function autoTriggerTelegramScenario(message) {
       console.error('Failed to copy message to clipboard:', error);
     }
 
-    // #region agent log - H-B: verify queue length after
-    fetch('http://127.0.0.1:7245/ingest/fafa93bc-385f-4735-aa3c-e6b9a7d9cc4c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'renderer.js:4254',message:'CASE2 complete - checking queue',data:{queueLengthAfter:telegramMessageQueue.length,scenarioId:telegramScenario.id},timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
-
-    // FIX: Add message to queue for processing after current scenario completes
+    // Add message to queue for processing after current scenario completes
     addToTelegramQueue(message);
 
     return true;

@@ -31,6 +31,9 @@ let scenarioExecutionInterval = null;
 let currentActionIndex = 0;
 let scenarioRepeatCount = 0;
 
+// Telegram Loop Mode State
+let telegramLoopIterations = 0;  // Đếm số lần đã chạy trong loop telegram
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
   initializeEventListeners();
@@ -757,6 +760,7 @@ function initializeScenarios() {
   // Toggle switch event listeners for new options
   document.getElementById('loopOptions').addEventListener('change', handleLoopOptionsToggle);
   document.getElementById('triggerByTelegram').addEventListener('change', handleTriggerByTelegramToggle);
+  document.getElementById('telegramLoopTrigger').addEventListener('change', handleTelegramLoopTriggerToggle);
 
   // Setup stop running scenario button
   setupStopRunningScenarioButton();
@@ -850,16 +854,35 @@ function selectScenario(id) {
   // Load new toggle options
   document.getElementById('loopOptions').checked = scenario.loopOptions || false;
   document.getElementById('triggerByTelegram').checked = scenario.triggerByTelegram || false;
+  document.getElementById('telegramLoopTrigger').checked = scenario.telegramLoopTrigger || false;
 
   // Update disabled states based on telegram trigger setting
   const loopOptionsToggle = document.getElementById('loopOptions');
+  const triggerByTelegramToggle = document.getElementById('triggerByTelegram');
+  const telegramLoopTriggerToggle = document.getElementById('telegramLoopTrigger');
   const repeatCountInput = document.getElementById('repeatCount');
 
-  if (scenario.triggerByTelegram) {
+  // When telegramLoopTrigger is enabled, disable loopOptions and triggerByTelegram
+  if (scenario.telegramLoopTrigger) {
+    loopOptionsToggle.checked = false;
+    loopOptionsToggle.disabled = true;
+    loopOptionsToggle.parentElement.classList.add('disabled');
+
+    triggerByTelegramToggle.checked = false;
+    triggerByTelegramToggle.disabled = true;
+    triggerByTelegramToggle.parentElement.classList.add('disabled');
+
+    repeatCountInput.disabled = true;
+    repeatCountInput.style.opacity = '0.5';
+    repeatCountInput.style.cursor = 'not-allowed';
+  } else if (scenario.triggerByTelegram) {
     // When telegram trigger is enabled, disable loopOptions and repeatCount
     loopOptionsToggle.checked = false;
     loopOptionsToggle.disabled = true;
     loopOptionsToggle.parentElement.classList.add('disabled');
+
+    triggerByTelegramToggle.disabled = false;
+    triggerByTelegramToggle.parentElement.classList.remove('disabled');
 
     repeatCountInput.disabled = true;
     repeatCountInput.style.opacity = '0.5';
@@ -868,6 +891,12 @@ function selectScenario(id) {
     // When telegram trigger is disabled, enable loopOptions and repeatCount
     loopOptionsToggle.disabled = false;
     loopOptionsToggle.parentElement.classList.remove('disabled');
+
+    triggerByTelegramToggle.disabled = false;
+    triggerByTelegramToggle.parentElement.classList.remove('disabled');
+
+    telegramLoopTriggerToggle.disabled = false;
+    telegramLoopTriggerToggle.parentElement.parentElement.classList.remove('disabled');
 
     repeatCountInput.disabled = false;
     repeatCountInput.style.opacity = '1';
@@ -1020,6 +1049,7 @@ function createNewScenario() {
     movementSpeed: 'normal',
     loopOptions: false,
     triggerByTelegram: false,
+    telegramLoopTrigger: false,
     actions: [],
     updatedAt: 'Just now'
   };
@@ -1041,12 +1071,18 @@ function saveScenario() {
   scenario.actionDelay = parseInt(document.getElementById('actionDelay').value);
   scenario.movementSpeed = document.getElementById('movementSpeed').value;
 
-  // Handle loopOptions and triggerByTelegram relationship
+  // Handle telegramLoopTrigger, triggerByTelegram and loopOptions relationship
+  const telegramLoopTrigger = document.getElementById('telegramLoopTrigger').checked;
   const triggerByTelegram = document.getElementById('triggerByTelegram').checked;
+
+  scenario.telegramLoopTrigger = telegramLoopTrigger;
   scenario.triggerByTelegram = triggerByTelegram;
 
-  // When triggerByTelegram is enabled, loopOptions must be false
-  if (triggerByTelegram) {
+  // Mutual exclusion: only one mode can be enabled
+  if (telegramLoopTrigger) {
+    scenario.loopOptions = false;
+    scenario.triggerByTelegram = false;
+  } else if (triggerByTelegram) {
     scenario.loopOptions = false;
   } else {
     scenario.loopOptions = document.getElementById('loopOptions').checked;
@@ -1184,19 +1220,24 @@ function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
   // Update Quick Run list to show running state
   updateQuickScenarioListState(scenarioId);
 
-  // For telegram-triggered scenarios: wait for message if not triggered by telegram yet
-  if (scenario.triggerByTelegram && !triggeredByTelegram) {
+  // For telegram-loop-triggered scenarios: wait for message if not triggered by telegram yet
+  if (scenario.telegramLoopTrigger && !triggeredByTelegram) {
     // Set waiting for message state
     scenario.isWaitingForMessage = true;
-    showToast(`📨 "${scenario.name}" is waiting for Telegram message...`, 'info');
+    telegramLoopIterations = 0;  // Reset counter
+    showToast(`🔁 "${scenario.name}" is waiting for Telegram message...`, 'info');
+
+    // Update banner to show waiting state
+    showRunningScenarioBanner(scenario);
 
     // Don't execute actions yet - wait for message
     return;
   }
 
-  // Clear waiting state if triggered by telegram
-  if (scenario.triggerByTelegram && triggeredByTelegram) {
+  // Clear waiting state if triggered by telegram (for both trigger modes)
+  if ((scenario.telegramLoopTrigger || scenario.triggerByTelegram) && triggeredByTelegram) {
     scenario.isWaitingForMessage = false;
+    telegramLoopIterations++;
   }
 
   showToast(`Started: ${scenario.name}`, 'success');
@@ -1253,6 +1294,20 @@ async function executeNextAction() {
 
       // Start next repeat
       executeNextAction();
+    } else if (scenario.telegramLoopTrigger) {
+      // Telegram Loop Mode: Wait for trigger to continue
+      showToast(`${scenario.name} - Hoan thanh lan ${telegramLoopIterations}. Doi Telegram trigger...`, 'info');
+
+      // Reset state but KEEP runningScenarioId to prevent being overwritten
+      currentActionIndex = 0;
+      scenario.isWaitingForMessage = true;
+
+      // Update UI to show waiting state
+      updateScenarioProgress(0, scenario.actions.length);
+      showRunningScenarioBanner(scenario);
+
+      // DO NOT call completeScenarioExecution() - wait for trigger
+      return;
     } else {
       // All repeats completed
       completeScenarioExecution();
@@ -1689,6 +1744,11 @@ function stopScenarioExecution() {
     // Reset waiting for message state
     scenario.isWaitingForMessage = false;
 
+    // Reset telegram loop iteration counter
+    if (scenario.telegramLoopTrigger) {
+      telegramLoopIterations = 0;
+    }
+
     showToast(`${scenario.name} - Stopped`, 'info');
   }
 
@@ -1728,7 +1788,9 @@ function showRunningScenarioBanner(scenario) {
 
   if (nameEl) {
     if (scenario.isWaitingForMessage) {
-      nameEl.innerHTML = `${scenario.icon} ${scenario.name} <span style="font-size: 12px; color: #a78bfa;">📨 WAITING FOR TELEGRAM...</span>`;
+      nameEl.innerHTML = `${scenario.icon} ${scenario.name} <span style="font-size: 12px; color: #a78bfa;">📨 WAITING FOR TRIGGER...</span>`;
+    } else if (scenario.telegramLoopTrigger) {
+      nameEl.innerHTML = `${scenario.icon} ${scenario.name} <span style="font-size: 12px; color: #fbbf24;">🔁 TELEGRAM LOOP - Lan ${telegramLoopIterations}</span>`;
     } else if (scenario.loopOptions) {
       nameEl.innerHTML = `${scenario.icon} ${scenario.name} <span style="font-size: 12px; color: #fbbf24;">🔄 INFINITE LOOP</span>`;
     } else if (scenario.repeatCount > 1) {
@@ -1740,7 +1802,9 @@ function showRunningScenarioBanner(scenario) {
 
   if (progressText) {
     if (scenario.isWaitingForMessage) {
-      progressText.textContent = `Waiting for new Telegram message...`;
+      progressText.textContent = `Doi Telegram trigger...`;
+    } else if (scenario.telegramLoopTrigger) {
+      progressText.textContent = `Lan ${telegramLoopIterations}: 0 / ${scenario.actions.length} actions`;
     } else {
       progressText.textContent = `0 / ${scenario.actions.length} actions`;
     }
@@ -3102,6 +3166,50 @@ function handleTriggerByTelegramToggle(e) {
   }
 }
 
+// Handle Telegram Loop Trigger Toggle
+function handleTelegramLoopTriggerToggle(e) {
+  const loopTriggerEnabled = e.target.checked;
+  const loopOptionsToggle = document.getElementById('loopOptions');
+  const triggerByTelegramToggle = document.getElementById('triggerByTelegram');
+  const repeatCountInput = document.getElementById('repeatCount');
+
+  if (loopTriggerEnabled) {
+    // When Loop Telegram Trigger is enabled:
+    // - Disable Loop Options and set to false
+    // - Disable Trigger By Telegram and set to false
+    // - Disable Repeat Count
+    loopOptionsToggle.checked = false;
+    loopOptionsToggle.disabled = true;
+    loopOptionsToggle.parentElement.classList.add('disabled');
+
+    triggerByTelegramToggle.checked = false;
+    triggerByTelegramToggle.disabled = true;
+    triggerByTelegramToggle.parentElement.classList.add('disabled');
+
+    repeatCountInput.disabled = true;
+    repeatCountInput.style.opacity = '0.5';
+    repeatCountInput.style.cursor = 'not-allowed';
+
+    showToast('Loop Telegram Trigger enabled - Chạy xong se đợi Telegram trigger', 'info');
+  } else {
+    // When Loop Telegram Trigger is disabled:
+    // - Re-enable Loop Options
+    // - Re-enable Trigger By Telegram
+    // - Re-enable Repeat Count
+    loopOptionsToggle.disabled = false;
+    loopOptionsToggle.parentElement.classList.remove('disabled');
+
+    triggerByTelegramToggle.disabled = false;
+    triggerByTelegramToggle.parentElement.classList.remove('disabled');
+
+    repeatCountInput.disabled = false;
+    repeatCountInput.style.opacity = '1';
+    repeatCountInput.style.cursor = 'default';
+
+    showToast('Loop Telegram Trigger disabled', 'info');
+  }
+}
+
 // Keyboard Shortcuts for Scenarios
 function handleScenarioKeyboardShortcuts(e) {
   // Ctrl/Cmd + 3 to switch to Scenarios tab
@@ -3695,13 +3803,23 @@ let telegramOffset = 0;
 
 // Auto-trigger telegram-enabled scenario when new message arrives
 async function autoTriggerTelegramScenario(message) {
-  // Find any scenario with triggerByTelegram enabled and is waiting for message
-  const telegramScenario = scenarios.find(s =>
-    s.triggerByTelegram &&
+  // First, try to find a telegramLoopTrigger scenario (priority)
+  let telegramScenario = scenarios.find(s =>
+    s.telegramLoopTrigger &&
     s.isWaitingForMessage &&
     s.actions &&
     s.actions.length > 0
   );
+
+  // If not found, try triggerByTelegram scenario
+  if (!telegramScenario) {
+    telegramScenario = scenarios.find(s =>
+      s.triggerByTelegram &&
+      s.isWaitingForMessage &&
+      s.actions &&
+      s.actions.length > 0
+    );
+  }
 
   if (!telegramScenario) {
     console.log('No telegram-triggered scenario found waiting for message');
@@ -3714,7 +3832,7 @@ async function autoTriggerTelegramScenario(message) {
     return false;
   }
 
-  // Check if another scenario is already running
+  // Check if another scenario is already running (but allow same scenario to continue)
   if (runningScenarioId && runningScenarioId !== telegramScenario.id) {
     console.log('Another scenario is already running, message queued');
     telegramMessageQueue.push(message);

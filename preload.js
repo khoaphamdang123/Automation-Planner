@@ -12,11 +12,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ===========================================
   // NUT.JS ACTION HANDLERS
   // ===========================================
+  
 
   // Control Flow Actions
   executeDelay: (params) => ipcRenderer.invoke('execute-delay', params),
   executeIf: (params) => ipcRenderer.invoke('execute-if', params),
   executeLoop: (params) => ipcRenderer.invoke('execute-loop', params),
+   
 
   // Application / Window Actions
   executeLaunchApp: (params) => ipcRenderer.invoke('execute-launch-app', params),
@@ -68,7 +70,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopCoordinateRecording: () => ipcRenderer.invoke('stop-coordinate-recording'),
   getRecordedCoordinates: () => ipcRenderer.invoke('get-recorded-coordinates'),
   clearRecordedCoordinates: () => ipcRenderer.invoke('clear-recorded-coordinates'),
-  onCoordinateCaptured: (callback) => ipcRenderer.on('coordinates-captured', (event, data) => callback(data)),
+  onStopAllAutoScript:(callback)=>ipcRenderer.on('stop-all-auto-script',(event,data)=>callback(data)),
+  onCoordinateCaptured: (callback) => ipcRenderer.on('coordinates-captured', (event, data) => callback()),
   onCoordinateCountUpdate: (callback) => ipcRenderer.on('coordinate-count-update', (event, count) => callback(count)),
   onCoordinateRecordingStopped: (callback) => ipcRenderer.on('coordinate-recording-stopped', (event, data) => callback(data))
 });

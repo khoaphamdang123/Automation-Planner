@@ -57,11 +57,13 @@ const { uIOhook } = require('uiohook-napi');
 let mouseHookStarted = false;
 let keyboardHookStarted = false;
 
+
 // ===========================================
 // GLOBAL KEYBOARD LISTENER FOR RECORDING STOP
 // ===========================================
 
 function setupKeyboardHook() {
+console.log('ini hite');
   if (keyboardHookStarted) {
     console.log('>>> Keyboard hook already started, skipping...');
     return;
@@ -74,9 +76,30 @@ function setupKeyboardHook() {
     
     // Enter key codes: 13 (standard), 28 (Windows/nut.js), or check for key property
     const isEnterKey = event.keycode === 13 || event.keycode === 28 || event.key === 'Enter';
-    
-    if (isEnterKey && isRecordingCoordinates) {
+       const isEsc =
+    event.keycode === 1 ||
+    event.keycode === 27 ||
+    event.key === 'Escape';
+
+    if(isEsc)
+    {
+      console.log("[ESC] ESC Key has been pressed - stopping all scripts and scenarios");
+      if(mainWindow)
+      {
+        mainWindow.restore();
+        mainWindow.focus();
+        mainWindow.webContents.send('stop-all-auto-script', true);
+      }
+    }
+ 
+   if(isEnterKey)
+   {   
+
+   console.log("Enter Key has been pressed");
+
+    if (isRecordingCoordinates) {
       console.log('>>> ENTER pressed during recording - stopping recording...');
+      
       
       // Stop recording
       const coordinates = stopCoordinateRecording();
@@ -93,7 +116,8 @@ function setupKeyboardHook() {
         mainWindow.webContents.send('coordinate-recording-stopped', coordinates);
       }
     }
-  });
+  }
+});
   
   uIOhook.on('keyup', (event) => {
     console.log('>>> Keyup received, keycode:', event.keycode);
@@ -103,6 +127,8 @@ function setupKeyboardHook() {
   
   keyboardHookStarted = true;
 }
+    
+
 
 async function startCoordinateRecording() {
   if (isRecordingCoordinates) return;
@@ -159,9 +185,9 @@ async function startCoordinateRecording() {
       }
     });
 
-    console.log('>>> Starting uIOhook...');
-    uIOhook.start();
-    console.log('>>> uIOhook started successfully');
+    // console.log('>>> Starting uIOhook...');
+    // uIOhook.start();
+    // console.log('>>> uIOhook started successfully');
     
     mouseHookStarted = true;
   }
@@ -210,11 +236,14 @@ function createWindow() {
 
   mainWindow.loadFile('index.html');
 
-  // Mở DevTools để xem console logs
-  mainWindow.webContents.openDevTools();
+  //mainWindow.webContents.openDevTools();
 
+  
   mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
+    mainWindow.show();    
+   setupKeyboardHook();
+   uIOhook.start();
+
   });
 
   // Capture console logs from renderer process
@@ -224,10 +253,11 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
-  });
+  });    
 }
 
 app.whenReady().then(createWindow);
+
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -246,6 +276,7 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+
 // Helper function to convert key name
 function getRobotKey(key) {
   const keyMap = {
@@ -259,6 +290,7 @@ function getRobotKey(key) {
   };
   return keyMap[key.toLowerCase()] || key;
 }
+
 
 // ===========================================
 // AUTOMATION IPC HANDLERS
@@ -860,7 +892,7 @@ ipcMain.handle('execute-send-message-to-tele', async (event, { token, chatId, cu
 
       console.log("in this chatid:"+targetChatId);
 
-      console.log("in this chat tele path:"+photoPath);
+      console.log("in this chat tele path:"+photoPath);      
 
       if (!photoPath || photoPath.trim() === '') {
         return { success: false, error: 'Photo path is empty in clipboard' };
@@ -976,10 +1008,9 @@ function hexToRgb(hex) {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
   return result ? { r: parseInt(result[1], 16), g: parseInt(result[2], 16), b: parseInt(result[3], 16) } : null;
 }
-
 function colorsMatch(pixel, target, tolerance = 10) {
   if (!pixel || !target) return false;
   return Math.abs(pixel.r - target.r) <= tolerance &&
          Math.abs(pixel.g - target.g) <= tolerance &&
-         Math.abs(pixel.b - target.b) <= tolerance;
+         Math.abs(pixel.b - target.b) <= tolerance;  
 }

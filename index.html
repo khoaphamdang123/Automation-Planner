@@ -65,6 +65,7 @@
                 <div class="progress-fill" id="scenarioProgressFill"></div>
               </div>
               <span class="progress-text" id="progressText">0 / 0 actions</span>
+              <span class="queue-info" id="queueInfo" style="display: none;"></span>
             </div>
             <button class="stop-scenario-btn" id="stopRunningScenarioBtn">
               <span>⏹️</span> Stop Scenario
@@ -383,21 +384,25 @@
                   </label>
                   <span class="setting-hint">Run once, wait for Telegram, repeat</span>
                 </div>
-                <div class="setting-card" id="sequenceScenarioCard" style="display: none;">
-                  <h4><span class="setting-icon">📋</span> Sequence Scenario</h4>
-                  <select id="sequenceScenarioSelect" class="setting-select">
-                    <option value="">-- Chon Scenario --</option>
-                  </select>
-                  <span class="setting-hint">Scenario chay sau Loop Telegram Trigger</span>
+              </div>
+
+              <!-- Sub-Actions Section (shown when Loop Telegram Trigger is enabled) -->
+              <div class="sub-actions-section" id="subActionsSection" style="display: none;">
+                <div class="section-header sub-header">
+                  <h3>📋 Sub-Actions (When Queue Empty)</h3>
+                  <span class="section-hint">These actions run when no messages in queue</span>
                 </div>
-                <div class="setting-card">
-                  <h4><span class="setting-icon">🔀</span> Sequence Mode</h4>
-                  <label class="switch">
-                    <input type="checkbox" id="telegramSequenceMode">
-                    <span class="slider"></span>
-                  </label>
-                  <span class="setting-hint">Chay xong → Chay Scenario khac → Doi Telegram</span>
+                <div class="scenario-actions-list" id="subActionsList">
+                  <!-- Sub-actions will be rendered here -->
+                  <div class="empty-actions-placeholder" id="subActionsPlaceholder">
+                    <span class="empty-icon">📭</span>
+                    <p>No sub-actions added yet</p>
+                    <span class="empty-hint">Add actions to execute while waiting for Telegram messages</span>
+                  </div>
                 </div>
+                <button class="small-btn" id="addSubActionBtn">
+                  <span>➕</span> Add Sub-Action
+                </button>
               </div>
 
               <!-- Scenario Actions List -->

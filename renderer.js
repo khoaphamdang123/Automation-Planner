@@ -32,8 +32,9 @@ let scenarioExecutionInterval = null;
 let currentActionIndex = 0;
 let scenarioRepeatCount = 0;
 
-// Telegram Loop Mode State
+// Telegram Loop Mode State - Support multiple concurrent telegram-loop-trigger scenarios
 let telegramLoopIterations = 0;  // Đếm số lần đã chạy trong loop telegram
+let telegramWaitingScenarios = [];  // Array of scenario IDs that are waiting for telegram trigger
 
 // Telegram Sequence Mode State
 let telegramSequenceMode = false;  // Chế độ sequence
@@ -43,6 +44,8 @@ let telegramSequenceTimeoutId = null;  // Timeout ID de huy khi dung
 let telegramSequenceInterrupted = false;  // Sequence bi interrupt boi telegram
 let telegramParentScenarioId = null;  // ID của scenario cha (Loop Telegram Trigger)
 let telegramRunningLoopTrigger = false;  // Đang chạy Loop Telegram Trigger scenario
+let isRunningSubActions = false;  // Đang chạy sub-actions thay vì main actions
+let isScenarioExecutionStopped = false;  // Flag to track if scenario was stopped by ESC or manual stop
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
@@ -259,12 +262,22 @@ function runQuickScenario(scenarioId) {
 
   // If a scenario is already running, stop it first
   if (runningScenarioId !== null) {
+    // Scenario is actively running, stop it first
     showToast('Stopping current scenario...', 'info');
     stopScenarioExecution();
   }
 
   // Select and run the scenario
   selectedScenarioId = scenarioId;
+
+  // Update scenario list selection
+  document.querySelectorAll('.scenario-item').forEach(item => {
+    item.classList.toggle('active', parseInt(item.dataset.id) === scenarioId);
+  });
+
+  // Update quick scenario list
+  updateQuickScenarioListState(scenarioId);
+
   showToast(`Running: ${scenario.name}`, 'info');
 
   // Switch to scenarios tab to show running banner
@@ -294,6 +307,37 @@ function toggleAutomation() {
   }
 }
 
+window.electronAPI.onStopAllAutoScript(()=>{
+  console.log('[ESC] Stop All Auto Script triggered');
+
+  // Stop main automation if running
+  if(isAutomationRunning)
+  {
+    stopAutomation();
+  }
+
+  // Set the stopped flag to prevent action execution
+  isScenarioExecutionStopped = true;
+
+  // Stop all running scenarios
+  if (runningScenarioId) {
+    console.log('[ESC] Stopping all running scenarios');
+    stopScenarioExecution();
+  }
+
+  // Stop sequence scenario if running
+  if (telegramSequenceRunning) {
+    console.log('[ESC] Stopping sequence scenario');
+    stopSequenceScenario();
+  }
+
+  // Stop telegram loop trigger
+  if (telegramRunningLoopTrigger) {
+    console.log('[ESC] Stopping telegram loop trigger');
+    telegramRunningLoopTrigger = false;
+  }
+});
+  
 async function startAutomation() {
   try {
     const result = await window.electronAPI.startAutomation();
@@ -461,6 +505,30 @@ function changePage(delta) {
 
 // Keyboard Shortcuts
 function handleKeyboardShortcuts(e) {
+  // Space key to stop running scenario (only when scenario is running)
+  if (e.key === ' ' && runningScenarioId) {
+    e.preventDefault();
+    console.log('[DEBUG] Space pressed - stopping scenario');
+    stopScenarioExecution();
+
+    // Restore window to center
+    window.electronAPI.restoreWindowCenter();
+
+    return;
+  }
+
+  // Enter key to stop all running scenarios
+  if (e.key === 'Enter' && runningScenarioId) {
+    e.preventDefault();
+    console.log('[DEBUG] Enter pressed - stopping all scenarios');
+    stopAllScenarios();
+
+    // Restore window to center
+    window.electronAPI.restoreWindowCenter();
+
+    return;
+  }
+
   // Ctrl/Cmd + S to start/stop automation
   if ((e.ctrlKey || e.metaKey) && e.key === 's') {
     e.preventDefault();
@@ -599,7 +667,12 @@ function loadScenarios() {
 
     if (savedScenarios) {
       scenarios = JSON.parse(savedScenarios);
-      console.log('Scenarios loaded from localStorage:', scenarios.length, 'scenarios');
+      console.log('[DEBUG-LOAD] Scenarios loaded from localStorage:', scenarios.length, 'scenarios');
+
+      // Debug: log trigger status for each scenario
+      scenarios.forEach((s, idx) => {
+        console.log(`[DEBUG-LOAD] [${idx}] ${s.name}: triggerByTelegram=${s.triggerByTelegram}, telegramLoopTrigger=${s.telegramLoopTrigger}, actions=${s.actions.length}`);
+      });
     }
 
     if (savedCounter) {
@@ -771,7 +844,7 @@ function initializeScenarios() {
   document.getElementById('loopOptions').addEventListener('change', handleLoopOptionsToggle);
   document.getElementById('triggerByTelegram').addEventListener('change', handleTriggerByTelegramToggle);
   document.getElementById('telegramLoopTrigger').addEventListener('change', handleTelegramLoopTriggerToggle);
-  document.getElementById('telegramSequenceMode').addEventListener('change', handleTelegramSequenceModeToggle);
+  document.getElementById('addSubActionBtn').addEventListener('click', addSubActionToScenario);
 
   // Setup stop running scenario button
   setupStopRunningScenarioButton();
@@ -867,29 +940,20 @@ function selectScenario(id) {
   document.getElementById('triggerByTelegram').checked = scenario.triggerByTelegram || false;
   document.getElementById('telegramLoopTrigger').checked = scenario.telegramLoopTrigger || false;
 
-  // Load sequence mode
-  document.getElementById('telegramSequenceMode').checked = scenario.telegramSequenceMode || false;
-
-  // Populate sequence scenario dropdown
-  populateSequenceScenarioDropdown(scenario.telegramSequenceScenarioId);
-
-  // Show/hide sequence scenario card based on mode
-  const sequenceCard = document.getElementById('sequenceScenarioCard');
-  const sequenceModeCard = document.getElementById('telegramSequenceMode')?.closest('.setting-card');
-
-  if (scenario.telegramLoopTrigger && scenario.telegramSequenceMode) {
-    if (sequenceCard) sequenceCard.style.display = 'block';
-    if (sequenceModeCard) sequenceModeCard.style.display = 'block';
-  } else {
-    if (sequenceCard) sequenceCard.style.display = 'none';
-    if (sequenceModeCard) sequenceModeCard.style.display = 'none';
+  // Show/hide sub-actions section based on telegramLoopTrigger
+  const subActionsSection = document.getElementById('subActionsSection');
+  if (subActionsSection) {
+    subActionsSection.style.display = scenario.telegramLoopTrigger ? 'block' : 'none';
   }
 
   // Update disabled states based on telegram trigger setting
   updateScenarioSettingsDisabledStates();
 
-  // Render actions
+  // Render main actions
   renderScenarioActions(scenario.actions);
+
+  // Render sub-actions if telegramLoopTrigger is enabled
+  renderSubActions(scenario.subActions || []);
 }
 
 // Render Scenario Actions
@@ -922,6 +986,116 @@ function renderScenarioActions(actions) {
   // Re-attach event listeners
   setupActionItemEventListeners();
   setupDragAndDrop();
+}
+
+// Render Sub-Actions (for telegramLoopTrigger scenarios)
+function renderSubActions(actions) {
+  const container = document.getElementById('subActionsList');
+  const placeholder = document.getElementById('subActionsPlaceholder');
+
+  if (!container) return;
+
+  if (!actions || actions.length === 0) {
+    if (placeholder) {
+      placeholder.style.display = 'flex';
+    }
+    // Remove any existing action items but keep placeholder
+    const existingItems = container.querySelectorAll('.scenario-action-item');
+    existingItems.forEach(item => item.remove());
+    return;
+  }
+
+  if (placeholder) {
+    placeholder.style.display = 'none';
+  }
+
+  container.innerHTML = actions.map((action, index) => `
+    <div class="scenario-action-item sub-action-item" data-sub-action-id="${action.id}" draggable="true" data-index="${index}">
+      <span class="drag-handle" title="Drag to reorder">⋮⋮</span>
+      <span class="action-order">${index + 1}</span>
+      <span class="action-type">${getActionIcon(action.type)}</span>
+      <span class="action-details">${action.name}</span>
+      <div class="action-controls">
+        <button class="row-action-btn edit sub-edit" title="Edit">✏️</button>
+        <button class="row-action-btn delete sub-delete" title="Delete">🗑️</button>
+      </div>
+    </div>
+  `).join('');
+
+  // Re-attach event listeners for sub-actions
+  setupSubActionItemEventListeners();
+}
+
+// Setup event listeners for sub-action item buttons
+function setupSubActionItemEventListeners() {
+  document.querySelectorAll('.sub-action-item .row-action-btn.edit').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      editSubAction(btn.closest('.sub-action-item'));
+    });
+  });
+
+  document.querySelectorAll('.sub-action-item .row-action-btn.delete').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteSubAction(btn.closest('.sub-action-item'));
+    });
+  });
+}
+
+// Add Sub-Action to Scenario
+function addSubActionToScenario() {
+  const scenario = scenarios.find(s => s.id === selectedScenarioId);
+  if (!scenario) return;
+
+  // Ensure subActions array exists
+  if (!scenario.subActions) {
+    scenario.subActions = [];
+  }
+
+  // Create new sub-action with unique ID
+  const newActionId = Date.now();
+  const newAction = {
+    id: newActionId,
+    type: 'delay',
+    name: 'New Sub-Action',
+    parameters: { durationMs: 1000 }
+  };
+
+  scenario.subActions.push(newAction);
+  renderSubActions(scenario.subActions);
+  saveScenarios();
+  showToast('Sub-action added', 'success');
+
+  // Open modal to edit the new action
+  setTimeout(() => {
+    const actionItem = document.querySelector(`[data-sub-action-id="${newActionId}"]`);
+    if (actionItem) {
+      editSubAction(actionItem);
+    }
+  }, 100);
+}
+
+// Edit Sub-Action
+function editSubAction(actionItem) {
+  const index = parseInt(actionItem.dataset.index);
+  const scenario = scenarios.find(s => s.id === selectedScenarioId);
+  if (!scenario || !scenario.subActions || !scenario.subActions[index]) return;
+
+  const action = scenario.subActions[index];
+  openAddActionModal(action, true);
+}
+
+// Delete Sub-Action
+function deleteSubAction(actionItem) {
+  const index = parseInt(actionItem.dataset.index);
+  const scenario = scenarios.find(s => s.id === selectedScenarioId);
+  if (!scenario || !scenario.subActions) return;
+
+  const deletedAction = scenario.subActions.splice(index, 1)[0];
+  renderSubActions(scenario.subActions);
+  saveScenarios();
+  showToast(`Sub-action "${deletedAction.name}" deleted`, 'info');
 }
 
 // Setup event listeners for action item buttons
@@ -1032,9 +1206,8 @@ function createNewScenario() {
     loopOptions: false,
     triggerByTelegram: false,
     telegramLoopTrigger: false,
-    telegramSequenceMode: false,
-    telegramSequenceScenarioId: null,
     actions: [],
+    subActions: [],
     updatedAt: 'Just now'
   };
 
@@ -1055,30 +1228,26 @@ function saveScenario() {
   scenario.actionDelay = parseInt(document.getElementById('actionDelay').value);
   scenario.movementSpeed = document.getElementById('movementSpeed').value;
 
-  // Handle telegramLoopTrigger, triggerByTelegram, telegramSequenceMode and loopOptions relationship
+  // Handle telegramLoopTrigger and loopOptions relationship
   const telegramLoopTrigger = document.getElementById('telegramLoopTrigger').checked;
   const triggerByTelegram = document.getElementById('triggerByTelegram').checked;
-  const telegramSequenceMode = document.getElementById('telegramSequenceMode')?.checked || false;
-  const telegramSequenceScenarioId = document.getElementById('sequenceScenarioSelect')?.value;
 
   scenario.telegramLoopTrigger = telegramLoopTrigger;
   scenario.triggerByTelegram = triggerByTelegram;
-  scenario.telegramSequenceMode = telegramSequenceMode;
-  scenario.telegramSequenceScenarioId = telegramSequenceScenarioId ? parseInt(telegramSequenceScenarioId) : null;
+
+  // Ensure subActions array exists for telegramLoopTrigger scenarios
+  if (telegramLoopTrigger && !scenario.subActions) {
+    scenario.subActions = [];
+  }
 
   // Mutual exclusion: only one mode can be enabled
   if (telegramLoopTrigger) {
     scenario.loopOptions = false;
     scenario.triggerByTelegram = false;
-    // telegramSequenceMode can be true or false independently
   } else if (triggerByTelegram) {
     scenario.loopOptions = false;
-    scenario.telegramSequenceMode = false;
-    scenario.telegramSequenceScenarioId = null;
   } else {
     scenario.loopOptions = document.getElementById('loopOptions').checked;
-    scenario.telegramSequenceMode = false;
-    scenario.telegramSequenceScenarioId = null;
   }
 
   scenario.updatedAt = 'Just now';
@@ -1088,15 +1257,14 @@ function saveScenario() {
 
   renderScenarioList();
   renderQuickScenarioList();
-  showToast('Scenario saved successfully', 'success');
+  showToast('Scenario saved successfully', 'success');  
 }
-
 // Duplicate Scenario
 function duplicateScenario() {
   const scenario = scenarios.find(s => s.id === selectedScenarioId);
   if (!scenario) return;
 
-  const newId = scenarioCounter++;
+  const newId = scenarioCounter++;   
   const newScenario = {
     ...scenario,
     id: newId,
@@ -1119,6 +1287,7 @@ function duplicateScenario() {
 // Delete Scenario
 function deleteScenario() {
   const scenario = scenarios.find(s => s.id === selectedScenarioId);
+  
   if (!scenario) return;
 
   if (scenarios.length <= 1) {
@@ -1128,8 +1297,8 @@ function deleteScenario() {
 
   if (confirm(`Are you sure you want to delete "${scenario.name}"?`)) {
     scenarios = scenarios.filter(s => s.id !== selectedScenarioId);
+    
     selectedScenarioId = scenarios[0].id;
-
     // Save to localStorage
     saveScenarios();
 
@@ -1143,6 +1312,7 @@ function deleteScenario() {
 // Render Scenario List
 function renderScenarioList() {
   const container = document.getElementById('scenarioList');
+  
   container.innerHTML = scenarios.map(scenario => `
     <div class="scenario-item ${scenario.id === selectedScenarioId ? 'active' : ''}" data-id="${scenario.id}">
       <span class="scenario-icon">${scenario.icon || '📁'}</span>
@@ -1168,16 +1338,60 @@ function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
   const scenario = scenarios.find(s => s.id === scenarioId);
   if (!scenario) return;
 
-  console.log('[DEBUG-START] startScenarioExecution:', scenario.name, 'id:', scenario.id, 'triggeredByTelegram:', triggeredByTelegram);
+  console.log('[DEBUG-START] startScenarioExecution:', scenario.name, 'triggeredByTelegram:', triggeredByTelegram);
 
-  // CRITICAL: Reset interrupt flags when starting a new scenario
-  // This prevents a scenario from being interrupted by a stale interrupt flag
-  telegramSequenceInterrupted = false;
-  console.log('[DEBUG-START] Reset telegramSequenceInterrupted = false');
+  // CRITICAL: Reset interrupt flags and stopped flag when starting a new scenario
+  // But DON'T reset telegramSequenceInterrupted if triggeredByTelegram - we need it to stop sub-actions
+  if (!triggeredByTelegram) {
+    telegramSequenceInterrupted = false;
+  }
+  isScenarioExecutionStopped = false;
 
   // Check if automation is running
   if (!isAutomationRunning) {
     showToast('⚠️ Please turn ON Automation first in the main tab', 'warning');
+    return;
+  }
+
+  // Check if telegramLoopTrigger scenario has messages before starting
+  // If queue is empty, start sub-actions instead of waiting
+  if (scenario.telegramLoopTrigger && !hasQueuedMessages(scenario)) {
+    console.log('[DEBUG-START] Telegram Loop Trigger - queue empty');
+
+    // Check if sub-actions exist
+    const hasSubActions = scenario.subActions && scenario.subActions.length > 0;
+    if (hasSubActions) {
+      console.log('[DEBUG-START] Queue empty - starting sub-actions while waiting');
+      showToast(`${scenario.name} - Queue empty, running sub-actions...`, 'info');
+
+      // Set running state for main scenario
+      runningScenarioId = scenarioId;
+      telegramRunningLoopTrigger = true;
+      isRunningSubActions = true;  // Flag to indicate we're running sub-actions
+
+      // Update UI - show stop button
+      const runBtn = document.getElementById('runScenarioBtn');
+      const testBtn = document.getElementById('testRunScenarioBtn');
+      const stopBtn = document.getElementById('stopScenarioBtn');
+      if (runBtn) runBtn.style.display = 'none';
+      if (testBtn) testBtn.style.display = 'none';
+      if (stopBtn) stopBtn.style.display = 'flex';
+
+      showRunningScenarioBanner(scenario);
+      updateQuickScenarioListState(scenarioId);
+
+      // Start executing sub-actions from index 0
+      currentActionIndex = 0;
+
+      // Start executing sub-actions
+      setTimeout(() => {
+        executeNextSubAction();
+      }, 500);
+    } else {
+      // No sub-actions - just wait for messages
+      console.log('[DEBUG-START] Queue empty, no sub-actions - waiting for new message...');
+      showToast(`${scenario.name} - Waiting for messages...`, 'info');
+    }
     return;
   }
 
@@ -1188,12 +1402,10 @@ function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
   }
 
   // Check if another scenario is already running
-  // BUT: Allow telegramLoopTrigger scenarios to interrupt other scenarios
   if (runningScenarioId && runningScenarioId !== scenarioId) {
-    // If this is a telegramLoopTrigger scenario being triggered, ALLOW it to interrupt
+    // Allow telegramLoopTrigger scenarios to interrupt other scenarios
     if (scenario.telegramLoopTrigger && triggeredByTelegram) {
-      console.log('[DEBUG-START] Allowing telegramLoopTrigger to interrupt running scenario');
-      // telegramSequenceInterrupted will be set by autoTriggerTelegramScenario
+      console.log('[DEBUG-START] Allowing telegramLoopTrigger to interrupt');
     } else {
       showToast('Another scenario is already running. Please stop it first.', 'warning');
       return;
@@ -1208,11 +1420,20 @@ function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
   // Auto minimize window when starting scenario
   window.electronAPI.minimizeWindow();
 
-  // Set repeat count (default to 1 if not set or invalid)
-  totalRepeatCount = Math.max(1, parseInt(scenario.repeatCount) || 1);
-  currentRepeatCount = 1;
+  // For telegram scenarios triggered by telegram, copy message to clipboard
+  // (already done in autoTriggerTelegramScenario)
 
-  // Update UI to show running state
+  // Mark telegram flags and initialize scenario-specific queue
+  if (scenario.telegramLoopTrigger) {
+    telegramRunningLoopTrigger = true;
+    // Initialize scenario-specific message queue if not exists
+    if (!scenario.messageQueue) {
+      scenario.messageQueue = [];
+    }
+    console.log('[DEBUG-START] Telegram Loop Trigger started for:', scenario.name, 'Queue size:', scenario.messageQueue.length);
+  }
+
+  // Update UI
   const runBtn = document.getElementById('runScenarioBtn');
   const testBtn = document.getElementById('testRunScenarioBtn');
   const stopBtn = document.getElementById('stopScenarioBtn');
@@ -1221,53 +1442,10 @@ function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
   if (testBtn) testBtn.style.display = 'none';
   if (stopBtn) stopBtn.style.display = 'flex';
 
-  // Show running scenario banner in Automation tab
   showRunningScenarioBanner(scenario);
-
-  // Update Quick Run list to show running state
   updateQuickScenarioListState(scenarioId);
 
-  // For telegram-loop-triggered scenarios: wait for message if not triggered by telegram yet
-  if (scenario.telegramLoopTrigger && !triggeredByTelegram) {
-    // Set waiting for message state
-    scenario.isWaitingForMessage = true;
-    console.log('[DEBUG-STATE] Set isWaitingForMessage = true for', scenario.name, 'id:', scenario.id);
-    telegramLoopIterations = 0;  // Reset counter
-    showToast(`🔁 "${scenario.name}" is waiting for Telegram message...`, 'info');
-
-    // Update banner to show waiting state
-    showRunningScenarioBanner(scenario);
-
-    // Don't execute actions yet - wait for message
-    return;
-  }
-
-  // Clear waiting state if triggered by telegram (for both trigger modes)
-  // BUT: Don't clear if telegramLoopTrigger has Sequence Mode - it will reset after Sequence completes
-  if ((scenario.telegramLoopTrigger || scenario.triggerByTelegram) && triggeredByTelegram) {
-    // Track that this scenario was just triggered by telegram
-    telegramJustTriggeredScenarioId = scenario.id;
-    console.log('[DEBUG-STATE] Set telegramJustTriggeredScenarioId =', scenario.id);
-
-    // Only reset isWaitingForMessage if NOT in Sequence Mode
-    // In Sequence Mode, we need to remember the scenario was triggered by telegram
-    // so that when the Sequence scenario finishes, we can check and return to the Loop Telegram Trigger
-    if (!scenario.telegramSequenceMode) {
-      scenario.isWaitingForMessage = false;
-      console.log('[DEBUG-STATE] Set isWaitingForMessage = false for', scenario.name, 'id:', scenario.id);
-    } else {
-      console.log('[DEBUG-STATE] Keep isWaitingForMessage = true for', scenario.name, 'id:', scenario.id, '(Sequence Mode)');
-    }
-    telegramLoopIterations++;
-  }
-
   showToast(`Started: ${scenario.name}`, 'success');
-
-  // Mark as running telegramLoopTrigger scenario
-  if (scenario.telegramLoopTrigger) {
-    telegramRunningLoopTrigger = true;
-    console.log('[DEBUG-START] Set telegramRunningLoopTrigger = true');
-  }
 
   // Start executing actions
   executeNextAction();
@@ -1275,23 +1453,42 @@ function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
 
 // Execute Next Action in the scenario
 async function executeNextAction() {
+  // Check if scenario execution was stopped (by ESC or manual stop)
+  if (isScenarioExecutionStopped) {
+    console.log('[DEBUG-EXEC] Scenario execution was stopped - NOT executing next action');
+    return;
+  }
+
   // Capture the scenario ID at the START of the function
   const startRunningId = runningScenarioId;
   const scenario = scenarios.find(s => s.id === startRunningId);
-  
+
   console.log(`[DEBUG-EXEC-FLOW] executeNextAction called - startRunningId: ${startRunningId}, telegramRunningLoopTrigger: ${telegramRunningLoopTrigger}`);
-  
+
   if (!scenario) {
     console.log('[DEBUG-EXEC] executeNextAction: No scenario found - STOPPING');
     return;
   }
 
   // KIEM TRA: Neu sequence bi interrupt boi telegram message
+  // But if triggeredByTelegram just now, we should allow main actions to run
   if (telegramSequenceInterrupted) {
-    console.log('[DEBUG-EXEC] Sequence INTERRUPTED - stopping:', scenario.name);
-    telegramSequenceInterrupted = false;
-    telegramSequenceRunning = false;
-    return;
+    // Check if this is a fresh telegram trigger (message was just set)
+    const isFreshTelegramTrigger = currentTelegramMessage && !telegramSequenceRunning && !isRunningSubActions;
+    
+    if (isFreshTelegramTrigger) {
+      // Fresh telegram message - clear flag and continue with main actions
+      console.log('[DEBUG-EXEC] Fresh telegram message - clearing interrupt and running main actions');
+      telegramSequenceInterrupted = false;
+      telegramSequenceRunning = false;
+      isRunningSubActions = false;
+    } else {
+      // Real interruption - stop
+      console.log('[DEBUG-EXEC] Sequence INTERRUPTED - stopping:', scenario.name);
+      telegramSequenceInterrupted = false;
+      telegramSequenceRunning = false;
+      return;
+    }
   }
 
   // Check if all actions have been executed
@@ -1363,33 +1560,67 @@ async function executeNextAction() {
       // Start next repeat
       executeNextAction();
     } else if (scenario.telegramLoopTrigger) {
-      // Telegram Loop Mode: When completes, ALWAYS run the sequence scenario
-      // The interrupt happens when telegram message arrives during sequence execution
-      if (scenario.telegramSequenceMode && scenario.telegramSequenceScenarioId !== null) {
-        // Co Sequence, chuyen sang chay sequence scenario
-        telegramLoopIterations++;  // Dem so lan hoan thanh loop
-
-        showToast(`${scenario.name} - Hoan thanh! Chuyen sang Scenario tiep theo...`, 'info');
-
-        // Chuyen sang sequence scenario
-        startSequenceScenario(scenario.telegramSequenceScenarioId);
-        return;
-      } else {
-        // Khong co Sequence, doi telegram nhu cu
-        showToast(`${scenario.name} - Hoan thanh lan ${telegramLoopIterations}. Doi Telegram trigger...`, 'info');
-
-        // Reset state but KEEP runningScenarioId to prevent being overwritten
-        currentActionIndex = 0;
-        scenario.isWaitingForMessage = true;
-        console.log('[DEBUG-STATE] executeNextAction: Set isWaitingForMessage = true for', scenario.name, 'id:', scenario.id);
-
-        // Update UI to show waiting state
-        updateScenarioProgress(0, scenario.actions.length);
-        showRunningScenarioBanner(scenario);
-
-        // DO NOT call completeScenarioExecution() - wait for trigger
-        return;
+      // Telegram Loop Trigger Mode: When main actions complete, check queue
+      // Clear clipboard and check for new messages
+      
+      console.log('[DEBUG-EXEC] Main actions completed - clearing clipboard');
+      
+      // Clear clipboard after main actions complete
+      if (currentTelegramMessage) {
+        window.electronAPI.clearClipboard().catch(err => console.error('Failed to clear clipboard:', err));
+        currentTelegramMessage = null;
+        console.log('[DEBUG-EXEC] Clipboard cleared');
       }
+      
+      // Check if there are new messages in the queue
+      const hasMessages = hasQueuedMessages(scenario);
+
+      if (hasMessages) {
+        // Queue has messages - continue with main actions
+        console.log('[DEBUG-EXEC] New messages detected in queue - continuing main actions');
+        showToast(`${scenario.name} - New message detected, continuing...`, 'info');
+
+        // Get message from queue
+        let queuedMessage = null;
+        if (telegramMessageQueue.length > 0) {
+          queuedMessage = telegramMessageQueue.shift();
+        } else if (scenario.messageQueue && scenario.messageQueue.length > 0) {
+          queuedMessage = scenario.messageQueue.shift();
+        }
+
+        if (queuedMessage) {
+          currentTelegramMessage = queuedMessage;
+          window.electronAPI.setClipboardText(queuedMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
+          console.log('[DEBUG-EXEC] New message copied to clipboard');
+        }
+
+        // Restart main actions from beginning
+        currentActionIndex = 0;
+        telegramSequenceTimeoutId = setTimeout(() => {
+          executeNextAction();
+        }, scenario.actionDelay || 500);
+      } else {
+        // Queue empty - switch to sub-actions
+        const hasSubActions = scenario.subActions && scenario.subActions.length > 0;
+        if (hasSubActions) {
+          console.log('[DEBUG-EXEC] Queue empty - switching to sub-actions');
+          showToast(`${scenario.name} - Queue empty, running sub-actions...`, 'info');
+
+          // Switch to sub-actions
+          isRunningSubActions = true;
+          currentActionIndex = 0;
+
+          telegramSequenceTimeoutId = setTimeout(() => {
+            executeNextSubAction();
+          }, scenario.actionDelay || 500);
+        } else {
+          // No sub-actions - just wait for messages
+          console.log('[DEBUG-EXEC] Main actions completed, no sub-actions - waiting');
+          showToast(`${scenario.name} - Completed! Waiting for messages...`, 'info');
+          completeScenarioExecution();
+        }
+      }
+      return;
     } else {
       // All repeats completed
       completeScenarioExecution();
@@ -1431,6 +1662,180 @@ async function executeNextAction() {
     console.error('Action execution error:', error);
     showToast(`Error in action: ${action.name}`, 'error');
     stopScenarioExecution();
+  }
+}
+
+// Helper function to check if there are any queued messages
+function hasQueuedMessages(scenario = null) {
+  // Check if there's a current message being processed
+  if (currentTelegramMessage) {
+    return true;
+  }
+
+  // Check global telegram queue
+  if (telegramMessageQueue && telegramMessageQueue.length > 0) {
+    return true;
+  }
+
+  // Check scenario-specific queue if scenario is provided
+  if (scenario && scenario.messageQueue && scenario.messageQueue.length > 0) {
+    return true;
+  }
+
+  return false;
+}
+
+// Execute Next Sub-Action (for telegramLoopTrigger when queue is empty)
+async function executeNextSubAction() {
+  // Safety check: Don't run sub-actions if main actions should be running
+  if (currentTelegramMessage && !isRunningSubActions) {
+    console.log('[DEBUG-EXEC-SUB] Main action trigger detected, skipping sub-actions');
+    return;
+  }
+
+  // Check if scenario execution was stopped
+  if (isScenarioExecutionStopped) {
+    console.log('[DEBUG-EXEC-SUB] Sub-action execution was stopped');
+    isRunningSubActions = false;
+    return;
+  }
+
+  const scenario = scenarios.find(s => s.id === runningScenarioId);
+  if (!scenario || !scenario.subActions) {
+    console.log('[DEBUG-EXEC-SUB] No scenario or sub-actions found');
+    isRunningSubActions = false;
+    return;
+  }
+
+  // Check if interrupted by telegram message (urgent check before each action)
+  if (telegramSequenceInterrupted) {
+    console.log('[DEBUG-EXEC-SUB] Sub-actions INTERRUPTED by telegram message');
+    telegramSequenceInterrupted = false;
+    isRunningSubActions = false;
+    return;
+  }
+
+  // Check queue BEFORE each sub-action - if messages arrived, switch to main actions
+  if (hasQueuedMessages(scenario)) {
+    console.log('[DEBUG-EXEC-SUB] Messages detected before sub-action - switching to main actions');
+    isRunningSubActions = false;
+    
+    // Extract message from queue and copy to clipboard
+    let queuedMessage = null;
+    if (telegramMessageQueue.length > 0) {
+      queuedMessage = telegramMessageQueue.shift();
+    } else if (scenario.messageQueue && scenario.messageQueue.length > 0) {
+      queuedMessage = scenario.messageQueue.shift();
+    }
+    
+    if (queuedMessage) {
+      currentTelegramMessage = queuedMessage;
+      window.electronAPI.setClipboardText(queuedMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
+      console.log('[DEBUG-EXEC-SUB] Message copied to clipboard from queue');
+    }
+    
+    currentActionIndex = 0;
+    telegramSequenceRunning = false;
+    executeNextAction();
+    return;
+  }
+
+  const subActions = scenario.subActions;
+
+  // Check if we've completed all sub-actions
+  if (currentActionIndex >= subActions.length) {
+    console.log('[DEBUG-EXEC-SUB] All sub-actions completed - checking queue before looping');
+    
+    // Check queue before looping - if messages arrived, switch to main actions
+    if (hasQueuedMessages(scenario)) {
+      console.log('[DEBUG-EXEC-SUB] Messages detected after sub-action loop - switching to main actions');
+      isRunningSubActions = false;
+      
+      // Extract message from queue and copy to clipboard
+      let queuedMessage = null;
+      if (telegramMessageQueue.length > 0) {
+        queuedMessage = telegramMessageQueue.shift();
+      } else if (scenario.messageQueue && scenario.messageQueue.length > 0) {
+        queuedMessage = scenario.messageQueue.shift();
+      }
+      
+      if (queuedMessage) {
+        currentTelegramMessage = queuedMessage;
+        window.electronAPI.setClipboardText(queuedMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
+        console.log('[DEBUG-EXEC-SUB] Message copied to clipboard from queue');
+      }
+      
+      currentActionIndex = 0;
+      telegramSequenceRunning = false;
+      executeNextAction();
+      return;
+    }
+    
+    // Queue is empty - continue looping sub-actions
+    console.log('[DEBUG-EXEC-SUB] Queue empty - looping sub-actions from beginning');
+    currentActionIndex = 0;
+
+    // Schedule next iteration with delay
+    telegramSequenceTimeoutId = setTimeout(() => {
+      // Safety check: Don't run if main actions should be running
+      if (isRunningSubActions && !isScenarioExecutionStopped && !currentTelegramMessage) {
+        executeNextSubAction();
+      }
+    }, scenario.actionDelay || 500);
+    return;
+  }
+
+  const subAction = subActions[currentActionIndex];
+
+  // Update progress for sub-actions
+  const progressContainer = document.getElementById('scenarioProgressText');
+  if (progressContainer) {
+    progressContainer.textContent = `Sub-action ${currentActionIndex + 1}/${subActions.length} (${subAction.name})`;
+  }
+
+    // Execute the sub-action
+  try {
+    await executeAction(subAction);
+    console.log(`[DEBUG-EXEC-SUB] Sub-action ${currentActionIndex} (${subAction.type}) completed`);
+    currentActionIndex++;
+
+    // AFTER completing sub-action: Check queue
+    if (hasQueuedMessages(scenario)) {
+      // Messages arrived - switch to main actions
+      console.log('[DEBUG-EXEC-SUB] Messages detected after sub-action - switching to main actions');
+      isRunningSubActions = false;
+      
+      // Extract message from queue and copy to clipboard
+      let queuedMessage = null;
+      if (telegramMessageQueue.length > 0) {
+        queuedMessage = telegramMessageQueue.shift();
+      } else if (scenario.messageQueue && scenario.messageQueue.length > 0) {
+        queuedMessage = scenario.messageQueue.shift();
+      }
+      
+      if (queuedMessage) {
+        currentTelegramMessage = queuedMessage;
+        window.electronAPI.setClipboardText(queuedMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
+        console.log('[DEBUG-EXEC-SUB] Message copied to clipboard from queue');
+      }
+      
+      currentActionIndex = 0;
+      telegramSequenceRunning = false;
+      executeNextAction();
+      return;
+    }
+
+    // No messages - continue with next sub-action
+    telegramSequenceTimeoutId = setTimeout(() => {
+      // Safety check: Don't run if main actions should be running
+      if (isRunningSubActions && !isScenarioExecutionStopped && !telegramSequenceInterrupted && !currentTelegramMessage) {
+        executeNextSubAction();
+      }
+    }, scenario.actionDelay || 500);
+  } catch (error) {
+    console.error('Sub-action execution error:', error);
+    showToast(`Error in sub-action: ${subAction.name}`, 'error');
+    isRunningSubActions = false;
   }
 }
 
@@ -1701,7 +2106,28 @@ function addToTelegramQueue(message) {
 
 // Process the next message from the FIFO queue
 async function processNextTelegramMessage() {
-  if (telegramMessageQueue.length === 0 || !runningScenarioId) {
+  console.log('[DEBUG-QUEUE] processNextTelegramMessage called');
+  console.log('[DEBUG-QUEUE] queue:', telegramMessageQueue.length, 'runningId:', runningScenarioId);
+
+  // For triggerByTelegram mode, we need to find the scenario even if runningScenarioId is null
+  // Check if we have a pending scenario that needs to process messages
+  let telegramScenario = null;
+
+  if (runningScenarioId) {
+    // Scenario is currently running, use it
+    telegramScenario = scenarios.find(s => s.id === runningScenarioId && (s.triggerByTelegram || s.telegramLoopTrigger));
+  } else {
+    // Scenario is not running, find a telegram-triggered scenario
+    telegramScenario = scenarios.find(s =>
+      (s.triggerByTelegram || s.telegramLoopTrigger) &&
+      s.actions &&
+      s.actions.length > 0
+    );
+    console.log('[DEBUG-QUEUE] Found scenario:', telegramScenario?.name);
+  }
+
+  if (!telegramScenario || telegramMessageQueue.length === 0) {
+    console.log('[DEBUG-QUEUE] No scenario or empty queue, returning');
     isProcessingTelegramQueue = false;
     currentTelegramMessage = null;
     return;
@@ -1711,6 +2137,8 @@ async function processNextTelegramMessage() {
   currentTelegramMessage = telegramMessageQueue.shift();
 
   if (!currentTelegramMessage) {
+    console.log('[DEBUG-QUEUE] No message in queue');
+    isProcessingTelegramQueue = false;
     return;
   }
 
@@ -1718,8 +2146,10 @@ async function processNextTelegramMessage() {
 
   // Copy message to clipboard
   await window.electronAPI.setClipboardText(currentTelegramMessage.content);
+  console.log('[DEBUG-QUEUE] Message copied to clipboard, restarting scenario:', telegramScenario.name);
 
-  // Clear clipboard after scenario completes (will be handled in completeScenarioExecution)
+  // Restart the scenario with the new message
+  await startScenarioExecution(telegramScenario.id, true);
 }
 
 // Clear the clipboard after processing
@@ -1734,20 +2164,15 @@ async function clearTelegramClipboard() {
 
 // Check if we should process telegram queue
 function shouldProcessTelegramQueue() {
-  if (!runningScenarioId) return false;
-
-  const scenario = scenarios.find(s => s.id === runningScenarioId);
-  return scenario && scenario.triggerByTelegram && isAutomationRunning;
+  // For telegram-triggered scenarios, queue processing happens in completeScenarioExecution
+  // This function is no longer needed
+  return false;
 }
 
 // Handle telegram message in queue
+// Note: Queue processing is now handled in completeScenarioExecution
 async function handleTelegramMessageQueue() {
-  if (!shouldProcessTelegramQueue()) return;
-
-  if (!isProcessingTelegramQueue && telegramMessageQueue.length > 0) {
-    isProcessingTelegramQueue = true;
-    await processNextTelegramMessage();
-  }
+  console.log('[DEBUG-QUEUE] handleTelegramMessageQueue called - queue processing now happens in completeScenarioExecution');
 }
 
 // ===========================================
@@ -1764,7 +2189,7 @@ function completeScenarioExecution() {
   const scenario = scenarios.find(s => s.id === runningScenarioId);
   if (!scenario) return;
 
-  const isTelegramScenario = scenario.triggerByTelegram;
+  const isTelegramScenario = scenario.triggerByTelegram || scenario.telegramLoopTrigger;
 
   // Clear clipboard if processing telegram message
   if (currentTelegramMessage) {
@@ -1779,37 +2204,42 @@ function completeScenarioExecution() {
 
   if (isTelegramScenario) {
     // For telegram-triggered scenarios:
-    // 1. Complete execution
-    // 2. Set isWaitingForMessage to true to wait for next message
-    // 3. If queue has more messages, process the next one
-    // 4. If queue is empty, wait for new incoming messages
+    // Check if there are more messages in this scenario's own queue
 
-    showToast(`${scenario.name} - Completed! Waiting for next message...`, 'success');
+    showToast(`${scenario.name} - Completed!`, 'success');
 
-    // Reset running state but keep isWaitingForMessage = true
+    // Reset running state
     runningScenarioId = null;
+    telegramRunningLoopTrigger = false;
 
-    // For triggerByTelegram scenarios, reset isWaitingForMessage to allow re-triggering
-    // For telegramLoopTrigger scenarios, KEEP isWaitingForMessage = true
-    if (scenario.telegramLoopTrigger) {
-      console.log('[DEBUG] telegramLoopTrigger scenario completed, keeping isWaitingForMessage = true');
-      // GIU NGUYEN isWaitingForMessage = true
-    } else {
-      scenario.isWaitingForMessage = false;
+    // Initialize queue if not exists
+    if (!scenario.messageQueue) {
+      scenario.messageQueue = [];
     }
 
-    // DO NOT clear the message queue - let remaining messages be processed
-    // Only reset processing flag
-    isProcessingTelegramQueue = false;
+    // If this scenario's queue has messages, process the next one
+    if (scenario.messageQueue.length > 0) {
+      console.log('[DEBUG] Scenario', scenario.name, 'has', scenario.messageQueue.length, 'messages in queue');
+      const nextMessage = scenario.messageQueue.shift();
 
-    // If there are still messages in the queue, shift and trigger the scenario again
-    if (telegramMessageQueue.length > 0) {
-      console.log('[DEBUG] Queue has messages, shifting and triggering again');
-      // SHIFT message out of queue before triggering
-      const nextMessage = telegramMessageQueue.shift();
+      // Copy message to clipboard
+      currentTelegramMessage = nextMessage;
+      window.electronAPI.setClipboardText(nextMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
+      // Restart the scenario
       setTimeout(async () => {
-        await autoTriggerTelegramScenario(nextMessage);
+        await startScenarioExecution(scenario.id, true);
       }, 500);
+    } else {
+      console.log('[DEBUG] Scenario', scenario.name, 'queue is empty, waiting for new messages...');
+
+      // If Sequence Mode is enabled and there's a sequence scenario, run it
+      if (scenario.telegramSequenceMode && scenario.telegramSequenceScenarioId) {
+        console.log('[DEBUG] Sequence Mode enabled - starting sequence scenario');
+        setTimeout(async () => {
+          await startSequenceScenario(scenario.telegramSequenceScenarioId);
+        }, 500);
+        return;
+      }
     }
 
     // Reset UI - show run buttons again
@@ -1827,23 +2257,61 @@ function completeScenarioExecution() {
     return;
   }
 
-  // For telegramLoopTrigger scenarios, KEEP isWaitingForMessage = true
-  if (scenario.telegramLoopTrigger) {
-    console.log('[DEBUG] telegramLoopTrigger scenario completed, keeping isWaitingForMessage = true');
+  // Check if this is a Sequence Scenario that should loop
+  if (telegramSequenceRunning && scenario.telegramSequenceMode && scenario.telegramSequenceScenarioId) {
+    console.log('[DEBUG-SEQ] Sequence Scenario completed, checking if should loop...');
+
+    // Reset running state
     runningScenarioId = null;
-    // GIU NGUYEN isWaitingForMessage = true
-    scenario.isWaitingForMessage = true;
 
-    // Reset UI
-    hideRunningScenarioBanner();
-    updateQuickScenarioListState(null);
+    // Check parent scenario's queue for new messages
+    const parentScenario = scenarios.find(s => s.id === telegramParentScenarioId);
+    if (parentScenario && parentScenario.messageQueue && parentScenario.messageQueue.length > 0) {
+      console.log('[DEBUG-SEQ] Parent scenario has messages - returning to telegram loop trigger');
+      // Return to telegram loop trigger scenario
+      telegramSequenceRunning = false;
+      telegramRunningLoopTrigger = true;
+      runningScenarioId = parentScenario.id;
+      currentActionIndex = 0;
 
-    const runBtn = document.getElementById('runScenarioBtn');
-    const testBtn = document.getElementById('testRunScenarioBtn');
-    const stopBtn = document.getElementById('stopScenarioBtn');
-    if (runBtn) runBtn.style.display = 'flex';
-    if (testBtn) testBtn.style.display = 'flex';
-    if (stopBtn) stopBtn.style.display = 'none';
+      // Get next message
+      const nextMessage = parentScenario.messageQueue.shift();
+      currentTelegramMessage = nextMessage;
+      window.electronAPI.setClipboardText(nextMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
+
+      showToast(`${parentScenario.name} - Message from queue!`, 'info');
+      showRunningScenarioBanner(parentScenario);
+
+      executeNextAction();
+      return;
+    }
+
+    // Check global queue as well
+    if (telegramMessageQueue.length > 0) {
+      console.log('[DEBUG-SEQ] Global queue has messages - returning to telegram loop trigger');
+      telegramSequenceRunning = false;
+      telegramRunningLoopTrigger = true;
+      runningScenarioId = parentScenario?.id || null;
+
+      if (runningScenarioId) {
+        const nextMessage = telegramMessageQueue.shift();
+        currentTelegramMessage = nextMessage;
+        window.electronAPI.setClipboardText(nextMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
+
+        showToast(`${parentScenario?.name || 'Scenario'} - Message from queue!`, 'info');
+        showRunningScenarioBanner(parentScenario);
+        executeNextAction();
+      }
+      return;
+    }
+
+    // No messages - Loop the Sequence Scenario continuously
+    console.log('[DEBUG-SEQ] No messages - looping Sequence Scenario');
+    showToast(`${scenario.name} - Looping...`, 'info');
+
+    setTimeout(async () => {
+      await startSequenceScenario(scenario.telegramSequenceScenarioId);
+    }, 500);
     return;
   }
 
@@ -1867,14 +2335,11 @@ function completeScenarioExecution() {
 
 // Stop Scenario Execution
 function stopScenarioExecution() {
+  // Set the stopped flag to prevent further action execution
+  isScenarioExecutionStopped = true;
+
   const scenario = scenarios.find(s => s.id === runningScenarioId);
   if (scenario) {
-    // CHI reset waiting for message state NEU KHONG PHAI LA TELEGRAM LOOP TRIGGER
-    // Vi neu la Loop Telegram Trigger, no dang cho tin nhan, khong the bi dung boi stopScenarioExecution
-    if (!scenario.telegramLoopTrigger) {
-      scenario.isWaitingForMessage = false;
-    }
-
     // Reset telegram loop iteration counter
     if (scenario.telegramLoopTrigger) {
       telegramLoopIterations = 0;
@@ -1893,6 +2358,7 @@ function stopScenarioExecution() {
   telegramSequenceRunning = false;
   telegramSequenceInterrupted = false;
   telegramRunningLoopTrigger = false;
+  isRunningSubActions = false;
   console.log('[DEBUG-STOP] Reset telegram flags');
 
   // Kiem tra queue khi chuyen sang scenario khac
@@ -1922,35 +2388,63 @@ function stopScenarioExecution() {
   if (stopBtn) stopBtn.style.display = 'none';
 }
 
+// Stop All Running Scenarios
+function stopAllScenarios() {
+  console.log('[DEBUG] stopAllScenarios called');
+
+  // Stop current scenario if running
+  if (runningScenarioId) {
+    stopScenarioExecution();
+  }
+
+  // Clear all scenario queues
+  scenarios.forEach(scenario => {
+    if (scenario.messageQueue && scenario.messageQueue.length > 0) {
+      scenario.messageQueue = [];
+      console.log('[DEBUG] Cleared queue for scenario:', scenario.name);
+    }
+  });
+
+  // Reset all telegram flags
+  telegramSequenceRunning = false;
+  telegramSequenceInterrupted = false;
+  telegramRunningLoopTrigger = false;
+  telegramLoopIterations = 0;
+
+  // Clear global queue (for backwards compatibility)
+  if (telegramMessageQueue.length > 0) {
+    telegramMessageQueue = [];
+    console.log('[DEBUG] Cleared global telegram queue');
+  }
+
+  // Update UI - clear all running states
+  document.querySelectorAll('.scenario-item').forEach(item => {
+    item.classList.remove('running');
+  });
+  document.querySelectorAll('.quick-scenario-item').forEach(item => {
+    item.classList.remove('running');
+  });
+
+  showToast('All scenarios stopped', 'info');
+}
+
 // Show Running Scenario Banner
 function showRunningScenarioBanner(scenario) {
   const banner = document.getElementById('runningScenarioBanner');
   const nameEl = document.getElementById('runningScenarioName');
   const progressText = document.getElementById('progressText');
   const progressFill = document.getElementById('scenarioProgressFill');
+  const queueInfo = document.getElementById('queueInfo');
 
   if (banner) {
     banner.style.display = 'flex';
   }
 
   if (nameEl) {
-    // Neu dang chay sequence scenario, hien thi sequence scenario dang chay
-    if (telegramSequenceRunning && scenario.telegramSequenceMode) {
-      const seqScenarioId = scenario.telegramSequenceScenarioId;
-      const seqScenario = seqScenarioId ? scenarios.find(s => s.id === seqScenarioId) : null;
-      const seqName = seqScenario ? seqScenario.name : 'Sequence';
-
-      if (scenario.isWaitingForMessage) {
-        // Dang doi trigger cho Loop Telegram Trigger
-        nameEl.innerHTML = `${scenario.icon} ${scenario.name} <span style="font-size: 12px; color: #a78bfa;">📨 DOI TRIGGER...</span>`;
-      } else {
-        // Dang chay sequence
-        nameEl.innerHTML = `${scenario.icon} ${scenario.name} <span style="font-size: 12px; color: #60a5fa;">🔀 CHAY ${seqName}</span>`;
-      }
-    } else if (scenario.isWaitingForMessage) {
-      nameEl.innerHTML = `${scenario.icon} ${scenario.name} <span style="font-size: 12px; color: #a78bfa;">📨 WAITING FOR TRIGGER...</span>`;
-    } else if (scenario.telegramLoopTrigger) {
-      nameEl.innerHTML = `${scenario.icon} ${scenario.name} <span style="font-size: 12px; color: #fbbf24;">🔁 TELEGRAM LOOP - Lan ${telegramLoopIterations}</span>`;
+    // Show running scenario with status
+    if (scenario.telegramLoopTrigger) {
+      const queueSize = scenario.messageQueue ? scenario.messageQueue.length : 0;
+      nameEl.innerHTML = `${scenario.icon} ${scenario.name} <span style="font-size: 12px; color: #fbbf24;">🔁 TELEGRAM LOOP</span>`;
     } else if (scenario.loopOptions) {
       nameEl.innerHTML = `${scenario.icon} ${scenario.name} <span style="font-size: 12px; color: #fbbf24;">🔄 INFINITE LOOP</span>`;
     } else if (scenario.repeatCount > 1) {
@@ -1961,29 +2455,29 @@ function showRunningScenarioBanner(scenario) {
   }
 
   if (progressText) {
-    if (telegramSequenceRunning && scenario.telegramSequenceMode) {
-      const seqScenarioId = scenario.telegramSequenceScenarioId;
-      const seqScenario = seqScenarioId ? scenarios.find(s => s.id === seqScenarioId) : null;
-      if (seqScenario) {
-        progressText.textContent = `${seqScenario.icon} ${seqScenario.name}: ${currentActionIndex} / ${seqScenario.actions.length}`;
-      } else {
-        progressText.textContent = `Sequence running...`;
-      }
-    } else if (scenario.isWaitingForMessage) {
-      progressText.textContent = `Doi Telegram trigger...`;
-    } else if (scenario.telegramLoopTrigger) {
-      progressText.textContent = `Lan ${telegramLoopIterations}: ${currentActionIndex} / ${scenario.actions.length}`;
+    if (scenario.telegramLoopTrigger) {
+      const queueSize = scenario.messageQueue ? scenario.messageQueue.length : 0;
+      progressText.textContent = `🔁 Lan ${telegramLoopIterations} | Queue: ${queueSize} | ${currentActionIndex}/${scenario.actions.length}`;
     } else {
       progressText.textContent = `${currentActionIndex} / ${scenario.actions.length}`;
     }
   }
 
   if (progressFill) {
-    const total = telegramSequenceRunning && scenario.telegramSequenceMode
-      ? (scenario.telegramSequenceScenarioId ? (scenarios.find(s => s.id === scenario.telegramSequenceScenarioId)?.actions.length || 1) : 1)
-      : scenario.actions.length;
+    const total = scenario.actions.length;
     const progress = total > 0 ? (currentActionIndex / total) * 100 : 0;
     progressFill.style.width = `${progress}%`;
+  }
+
+  // Show queue info for telegram scenarios
+  if (queueInfo) {
+    if (scenario.telegramLoopTrigger) {
+      const queueSize = scenario.messageQueue ? scenario.messageQueue.length : 0;
+      queueInfo.style.display = 'block';
+      queueInfo.innerHTML = `<span style="color: #a78bfa;">📨 Queue: ${queueSize} message(s) waiting</span>`;
+    } else {
+      queueInfo.style.display = 'none';
+    }
   }
 }
 
@@ -2004,9 +2498,13 @@ function updateScenarioProgress(current, total) {
   const scenario = scenarios.find(s => s.id === runningScenarioId);
   const progressText = document.getElementById('progressText');
   const progressFill = document.getElementById('scenarioProgressFill');
+  const queueInfo = document.getElementById('queueInfo');
 
   if (progressText) {
-    if (scenario && scenario.loopOptions) {
+    if (scenario && scenario.telegramLoopTrigger) {
+      const queueSize = scenario.messageQueue ? scenario.messageQueue.length : 0;
+      progressText.textContent = `🔁 Lan ${telegramLoopIterations} | ${current + 1}/${total}`;
+    } else if (scenario && scenario.loopOptions) {
       progressText.textContent = `🔄 Loop #${loopIterationCount + 1} - ${current + 1} / ${total} actions`;
     } else if (scenario && totalRepeatCount > 1) {
       progressText.textContent = `🔁 Repeat ${currentRepeatCount}/${totalRepeatCount} - ${current + 1} / ${total} actions`;
@@ -2018,6 +2516,15 @@ function updateScenarioProgress(current, total) {
   if (progressFill) {
     const percentage = ((current + 1) / total) * 100;
     progressFill.style.width = `${percentage}%`;
+  }
+
+  // Update queue info
+  if (queueInfo && scenario && scenario.telegramLoopTrigger) {
+    const queueSize = scenario.messageQueue ? scenario.messageQueue.length : 0;
+    queueInfo.style.display = 'block';
+    queueInfo.innerHTML = `<span style="color: #a78bfa;">📨 Queue: ${queueSize} message(s) waiting</span>`;
+  } else if (queueInfo) {
+    queueInfo.style.display = 'none';
   }
 }
 
@@ -2066,6 +2573,9 @@ function runScenario() {
     showToast('This scenario has no actions', 'warning');
     return;
   }
+
+  // Minimize window immediately when running scenario
+  window.electronAPI.minimizeWindow();
 
   // Start scenario execution
   startScenarioExecution(selectedScenarioId);
@@ -2412,14 +2922,15 @@ function initializeAddActionModal() {
 }
 
 // Open Add Action Modal
-function openAddActionModal(action = null) {
+function openAddActionModal(action = null, isSubAction = false) {
   // Reset state
   addActionModalState = {
     selectedType: null,
     actionName: '',
     parameters: {},
     errors: [],
-    editingActionId: action ? action.id : null
+    editingActionId: action ? action.id : null,
+    isSubAction: isSubAction
   };
 
   // Reset form
@@ -2439,7 +2950,7 @@ function openAddActionModal(action = null) {
 
   if (action) {
     // Edit mode
-    modalTitle.textContent = 'Edit Action';
+    modalTitle.textContent = isSubAction ? 'Edit Sub-Action' : 'Edit Action';
     confirmBtn.textContent = 'Save Changes';
     confirmBtn.disabled = false;
 
@@ -2471,8 +2982,8 @@ function openAddActionModal(action = null) {
     }
   } else {
     // Add mode
-    modalTitle.textContent = 'Add New Action';
-    confirmBtn.textContent = 'Add Action';
+    modalTitle.textContent = isSubAction ? 'Add New Sub-Action' : 'Add New Action';
+    confirmBtn.textContent = isSubAction ? 'Add Sub-Action' : 'Add Action';
   }
 
   // Show modal
@@ -3188,30 +3699,49 @@ function confirmAddAction() {
     return;
   }
 
-  const { selectedType, actionName, parameters, editingActionId } = addActionModalState;
+  const { selectedType, actionName, parameters, editingActionId, isSubAction } = addActionModalState;
 
   const scenario = scenarios.find(s => s.id === selectedScenarioId);
   if (!scenario) return;
 
   if (editingActionId) {
-    // Edit existing action
-    const actionIndex = scenario.actions.findIndex(a => a.id === editingActionId);
-    if (actionIndex !== -1) {
-      scenario.actions[actionIndex] = {
-        ...scenario.actions[actionIndex],
-        type: selectedType,
-        name: actionName.trim(),
-        parameters: { ...parameters }
-      };
+    // Edit existing action (main or sub-action)
+    if (isSubAction) {
+      // Edit sub-action
+      const subActionIndex = scenario.subActions.findIndex(a => a.id === editingActionId);
+      if (subActionIndex !== -1) {
+        scenario.subActions[subActionIndex] = {
+          ...scenario.subActions[subActionIndex],
+          type: selectedType,
+          name: actionName.trim(),
+          parameters: { ...parameters }
+        };
 
-      // Save to localStorage
-      saveScenarios();
+        saveScenarios();
+        renderSubActions(scenario.subActions);
+        renderScenarioList();
+        renderQuickScenarioList();
+        closeAddActionModal();
+        showToast('Sub-action updated successfully', 'success');
+      }
+    } else {
+      // Edit main action
+      const actionIndex = scenario.actions.findIndex(a => a.id === editingActionId);
+      if (actionIndex !== -1) {
+        scenario.actions[actionIndex] = {
+          ...scenario.actions[actionIndex],
+          type: selectedType,
+          name: actionName.trim(),
+          parameters: { ...parameters }
+        };
 
-      renderScenarioActions(scenario.actions);
-      renderScenarioList();
-      renderQuickScenarioList();
-      closeAddActionModal();
-      showToast('Action updated successfully', 'success');
+        saveScenarios();
+        renderScenarioActions(scenario.actions);
+        renderScenarioList();
+        renderQuickScenarioList();
+        closeAddActionModal();
+        showToast('Action updated successfully', 'success');
+      }
     }
   } else {
     // Create new action object
@@ -3222,17 +3752,26 @@ function confirmAddAction() {
       parameters: { ...parameters }
     };
 
-    // Add to current scenario
-    scenario.actions.push(newAction);
+    // Add to current scenario (main or sub-action)
+    if (isSubAction) {
+      // Ensure subActions array exists
+      if (!scenario.subActions) {
+        scenario.subActions = [];
+      }
+      scenario.subActions.push(newAction);
+      saveScenarios();
+      renderSubActions(scenario.subActions);
+      showToast('Sub-action added successfully', 'success');
+    } else {
+      scenario.actions.push(newAction);
+      saveScenarios();
+      renderScenarioActions(scenario.actions);
+      showToast('Action added successfully', 'success');
+    }
 
-    // Save to localStorage
-    saveScenarios();
-
-    renderScenarioActions(scenario.actions);
     renderScenarioList();
     renderQuickScenarioList();
     closeAddActionModal();
-    showToast('Action added successfully', 'success');
   }
 }
 
@@ -3343,32 +3882,17 @@ function handleTelegramLoopTriggerToggle(e) {
   const loopTriggerEnabled = e.target.checked;
   updateScenarioSettingsDisabledStates();
 
+  // Show/hide sub-actions section
+  const subActionsSection = document.getElementById('subActionsSection');
+  if (subActionsSection) {
+    subActionsSection.style.display = loopTriggerEnabled ? 'block' : 'none';
+  }
+
   if (loopTriggerEnabled) {
-    showToast('Loop Telegram Trigger enabled - Chay xong se doi Telegram trigger', 'info');
+    showToast('Loop Telegram Trigger enabled - Sub-actions will run when queue is empty', 'info');
   } else {
     showToast('Loop Telegram Trigger disabled', 'info');
   }
-}
-
-// Populate Sequence Scenario Dropdown
-function populateSequenceScenarioDropdown(selectedId) {
-  const select = document.getElementById('sequenceScenarioSelect');
-  if (!select) return;
-
-  const currentScenarioId = selectedScenarioId;
-
-  select.innerHTML = '<option value="">-- Chon Scenario --</option>';
-
-  scenarios.forEach(s => {
-    // Khong hien thi chinh no va khong hien thi co triggerByTelegram
-    if (s.id !== currentScenarioId && !s.triggerByTelegram && s.id !== (selectedScenarioId)) {
-      const option = document.createElement('option');
-      option.value = s.id;
-      option.textContent = `${s.icon} ${s.name}`;
-      if (s.id === selectedId) option.selected = true;
-      select.appendChild(option);
-    }
-  });
 }
 
 // Update Scenario Settings Disabled States
@@ -3449,22 +3973,6 @@ function updateScenarioSettingsDisabledStates() {
       repeatCountInput.style.opacity = '1';
       repeatCountInput.style.cursor = 'default';
     }
-  }
-}
-
-// Handle Telegram Sequence Mode Toggle
-function handleTelegramSequenceModeToggle(e) {
-  const sequenceModeEnabled = e.target.checked;
-  const sequenceCard = document.getElementById('sequenceScenarioCard');
-
-  if (sequenceCard) {
-    sequenceCard.style.display = sequenceModeEnabled ? 'block' : 'none';
-  }
-
-  if (sequenceModeEnabled) {
-    showToast('Sequence Mode enabled - Chon Scenario de chay sau Loop Telegram Trigger', 'info');
-  } else {
-    showToast('Sequence Mode disabled', 'info');
   }
 }
 
@@ -4065,244 +4573,90 @@ let isProcessingTelegramQueue = false;
 let currentTelegramMessage = null;
 let telegramOffset = 0;
 
-// Start Sequence Scenario
-async function startSequenceScenario(sequenceScenarioId) {
-  // CRITICAL: Don't start if sequence was interrupted by telegram
-  // This prevents Scenario B from restarting when Scenario A was just triggered
-  if (telegramSequenceInterrupted) {
-    console.log('[DEBUG-SEQ] startSequenceScenario SKIPPED - sequence was interrupted');
-    telegramSequenceRunning = false;
-    return;
-  }
-
-  const sequenceScenario = scenarios.find(s => s.id === sequenceScenarioId);
-  if (!sequenceScenario) {
-    console.log('Sequence scenario not found');
-    telegramSequenceRunning = false;
-    return;
-  }
-
-  // Save parent scenario id (Loop Telegram Trigger)
-  telegramParentScenarioId = runningScenarioId;
-
-  // Luu sequence scenario ID de kiem tra sau nay
-  telegramSequenceScenarioId = sequenceScenarioId;
-
-  // Reset telegramLoopTrigger flag - we are now running the sequence scenario
-  telegramRunningLoopTrigger = false;
-  console.log('[DEBUG-SEQ] Set telegramRunningLoopTrigger = false');
-
-  // Kiem tra queue - Neu co message dang cho thi QUAY LAI Scenario A
-  if (telegramMessageQueue.length > 0) {
-    console.log('[DEBUG-SEQ] Messages in queue - returning to telegramLoopTrigger scenario');
-    // Quay lai Scenario A thay vi chay Sequence
-    telegramSequenceRunning = false;
-    runningScenarioId = telegramParentScenarioId;
-    telegramRunningLoopTrigger = true;
-    currentActionIndex = 0;
-
-    // Kich hoat Scenario A voi message dau tien trong queue
-    const queuedMessage = telegramMessageQueue.shift();
-    currentTelegramMessage = queuedMessage;
-    try {
-      await window.electronAPI.setClipboardText(queuedMessage.content);
-    } catch (error) {
-      console.error('Failed to copy message to clipboard:', error);
-    }
-
-    showToast(`${scenarios.find(s => s.id === runningScenarioId)?.name} - Tin nhan tu queue!`, 'info');
-    await startScenarioExecution(runningScenarioId, true);
-    return;
-  }
-
-  // Chuyen sang sequence scenario
-  runningScenarioId = sequenceScenarioId;
-  currentActionIndex = 0;
-  loopIterationCount = 0;
-  telegramSequenceRunning = true;
-
-  // Cap nhat UI de hien thi dang chay sequence
-  showToast(`Bat dau: ${sequenceScenario.name}`, 'info');
-  showRunningScenarioBanner(sequenceScenario);
-
-  // Chay sequence scenario
-  executeNextAction();
-}
-
-// Stop Sequence Scenario
-function stopSequenceScenario() {
-  console.log('[DEBUG-TEL-2] stopSequenceScenario called');
-  if (telegramSequenceRunning) {
-    // Huy timeout neu dang cho
-    if (telegramSequenceTimeoutId) {
-      clearTimeout(telegramSequenceTimeoutId);
-      telegramSequenceTimeoutId = null;
-    }
-
-    const sequenceScenarioId = telegramSequenceScenarioId || document.getElementById('sequenceScenarioSelect')?.value;
-    if (sequenceScenarioId) {
-      const seqScenario = scenarios.find(s => s.id === parseInt(sequenceScenarioId));
-      if (seqScenario) {
-        showToast(`${seqScenario.name} - Bi dung boi Telegram trigger`, 'info');
-      }
-    }
-
-    // CHI reset flags, KHONG goi stopScenarioExecution
-    telegramSequenceRunning = false;
-    // KHONG reset telegramSequenceInterrupted - de executeNextAction xu ly
-    // telegramSequenceInterrupted = false;  // <-- REMOVED: De flag = true de executeNextAction xu ly
-    telegramParentScenarioId = null;
-
-    // Cap nhat UI nhung GIU NGUYEN runningScenarioId
-    // hideRunningScenarioBanner();
-    // updateQuickScenarioListState(null);
-
-    // Xoa buttons chay/dung
-    const runBtn = document.getElementById('runScenarioBtn');
-    const testBtn = document.getElementById('testRunScenarioBtn');
-    const stopBtn = document.getElementById('stopScenarioBtn');
-    if (runBtn) runBtn.style.display = 'none';
-    if (testBtn) testBtn.style.display = 'none';
-    if (stopBtn) stopBtn.style.display = 'none';
-  }
-}
-
 // Auto-trigger telegram-enabled scenario when new message arrives
 async function autoTriggerTelegramScenario(message) {
-  console.log('[DEBUG-TEL-2] autoTriggerTelegramScenario called');
-  console.log('[DEBUG-TEL-2] message:', message?.content);
-  console.log('[DEBUG-TEL-2] runningScenarioId:', runningScenarioId);
-  console.log('[DEBUG-TEL-2] isAutomationRunning:', isAutomationRunning);
-  console.log('[DEBUG-TEL-2] telegramSequenceRunning:', telegramSequenceRunning);
-
-  // First, try to find a telegramLoopTrigger scenario (priority)
-  console.log('[DEBUG-TEL-2] Searching for telegramLoopTrigger scenarios...');
-
-  // Debug: Log isWaitingForMessage for all scenarios
-  const allScenariosDebug = scenarios.map(s => ({
-    id: s.id,
-    name: s.name,
-    telegramLoopTrigger: s.telegramLoopTrigger,
-    isWaitingForMessage: s.isWaitingForMessage,
-    telegramSequenceMode: s.telegramSequenceMode,
-    telegramSequenceScenarioId: s.telegramSequenceScenarioId
-  }));
-  console.log('[DEBUG-TEL-2] All scenarios state:', JSON.stringify(allScenariosDebug, null, 2));
-
-  let telegramScenario = scenarios.find(s =>
-    s.telegramLoopTrigger &&
-    s.isWaitingForMessage &&
-    s.actions &&
-    s.actions.length > 0
-  );
-  console.log('[DEBUG-TEL-2] Found telegramLoopTrigger scenario:', telegramScenario?.name, 'id:', telegramScenario?.id);
-  console.log('[DEBUG-TEL-2] telegramScenario.isWaitingForMessage:', telegramScenario?.isWaitingForMessage);
-
-  // If not found, try triggerByTelegram scenario
-  if (!telegramScenario) {
-    console.log('[DEBUG-TEL-2] Searching for triggerByTelegram scenarios...');
-    telegramScenario = scenarios.find(s =>
-      s.triggerByTelegram &&
-      s.isWaitingForMessage &&
-      s.actions &&
-      s.actions.length > 0
-    );
-    console.log('[DEBUG-TEL-2] Found triggerByTelegram scenario:', telegramScenario?.name);
-  }
-
-  if (!telegramScenario) {
-    console.log('[DEBUG-TEL-2] No telegram-triggered scenario found waiting for message');
-    return false;
-  }
+  console.log('[DEBUG-TEL] autoTriggerTelegramScenario called');
+  console.log('[DEBUG-TEL] message:', message?.content?.substring(0, 50));
+  console.log('[DEBUG-TEL] runningScenarioId:', runningScenarioId);
+  console.log('[DEBUG-TEL] isAutomationRunning:', isAutomationRunning);
 
   // Check if automation is running
   if (!isAutomationRunning) {
-    console.log('[DEBUG-TEL-2] Automation is not running, cannot trigger scenario');
+    console.log('[DEBUG-TEL] Automation not running, queuing message only');
+    addToTelegramQueue(message);
     return false;
   }
 
-  // Log all scenarios for debugging
-  console.log('[DEBUG-TEL-2] Found telegramScenario:', telegramScenario?.name);
-  console.log('[DEBUG-TEL-2] telegramScenario.telegramLoopTrigger:', telegramScenario?.telegramLoopTrigger);
+  // Find a telegram-triggered scenario (triggerByTelegram or telegramLoopTrigger)
+  const telegramScenario = scenarios.find(s =>
+    (s.triggerByTelegram || s.telegramLoopTrigger) &&
+    s.actions &&
+    s.actions.length > 0
+  );
 
-  // CRITICAL: Neu co Loop Telegram Trigger scenario dang cho, xu ly dua tren trang thai hien tai
-  if (telegramScenario.telegramLoopTrigger && runningScenarioId && runningScenarioId !== telegramScenario.id) {
-    console.log('[DEBUG-TEL-2] Found telegramLoopTrigger scenario waiting');
+  if (!telegramScenario) {
+    console.log('[DEBUG-TEL] No telegram-triggered scenario found');
+    return false;
+  }
 
-    // CASE 1: Dang chay Scenario B (sequence) -> DUNG ngay lap tuc va CHAY Scenario A
-    // User muon interrupt B ngay khi co message
-    if (telegramSequenceRunning) {
-      console.log('[DEBUG-TEL-2] CASE 1: Stopping Sequence Scenario IMMEDIATELY - running telegramLoopTrigger');
-      showToast(`${scenarios.find(s => s.id === runningScenarioId)?.name} - Bi dung boi Telegram trigger!`, 'warning');
+  console.log('[DEBUG-TEL] Found scenario:', telegramScenario.name);
+  console.log('[DEBUG-TEL] runningScenarioId:', runningScenarioId, 'scenario.id:', telegramScenario.id);
 
-      // Dung sequence - SET INTERRUPT FLAG de executeNextAction dung
+  // CASE 1: Scenario is currently running
+  if (runningScenarioId === telegramScenario.id) {
+    console.log('[DEBUG-TEL] Scenario is running, queueing message to scenario queue');
+    // Initialize queue if not exists
+    if (!telegramScenario.messageQueue) {
+      telegramScenario.messageQueue = [];
+    }
+    telegramScenario.messageQueue.push(message);
+    console.log('[DEBUG-TEL] Scenario queue size:', telegramScenario.messageQueue.length);
+    showToast(`${telegramScenario.name} - Message queued (${telegramScenario.messageQueue.length} pending)`, 'info');
+    return true;
+  }
+
+  // CASE 2: Another scenario is running - interrupt it if it's telegramLoopTrigger
+  if (runningScenarioId && runningScenarioId !== telegramScenario.id) {
+    if (telegramScenario.telegramLoopTrigger && (telegramSequenceRunning || isRunningSubActions)) {
+      console.log('[DEBUG-TEL] Interrupting running scenario (sub-actions or sequence)');
       telegramSequenceInterrupted = true;
-      stopSequenceScenario();  // Huy timeout
+
+      // Clear timeout and stop sub-actions or sequence
+      if (telegramSequenceTimeoutId) {
+        clearTimeout(telegramSequenceTimeoutId);
+        telegramSequenceTimeoutId = null;
+      }
+
+      // Reset all flags for fresh start of main actions
+      telegramSequenceRunning = false;
+      isRunningSubActions = false;
+
+      // Continue to start the telegram scenario
+    } else {
+      console.log('[DEBUG-TEL] Another scenario running, queueing message to scenario queue');
+      // Initialize queue if not exists
+      if (!telegramScenario.messageQueue) {
+        telegramScenario.messageQueue = [];
+      }
+      telegramScenario.messageQueue.push(message);
+      console.log('[DEBUG-TEL] Scenario queue size:', telegramScenario.messageQueue.length);
+      showToast(`${telegramScenario.name} - Message queued (${telegramScenario.messageQueue.length} pending)`, 'info');
+      return true;
     }
-
-    // Reset running state
-    runningScenarioId = null;
-    currentActionIndex = 0;
-
-    // Copy message to clipboard
-    currentTelegramMessage = message;
-    try {
-      await window.electronAPI.setClipboardText(message.content);
-      console.log('[DEBUG-TEL-2] Message copied to clipboard');
-    } catch (error) {
-      console.error('Failed to copy message to clipboard:', error);
-    }
-
-    // Khoi dong Scenario A (Loop Telegram Trigger)
-    console.log('[DEBUG-TEL-2] Starting telegramScenario:', telegramScenario.name);
-    await startScenarioExecution(telegramScenario.id, true);
-
-    // KHONG them message vao queue o day - se duoc xu ly trong completeScenarioExecution
-
-    return true;
   }
 
-  // CASE 2: Dang chay Scenario A ma co tin nhan moi -> VAO HANG CHO
-  if (telegramScenario.telegramLoopTrigger && runningScenarioId === telegramScenario.id && telegramRunningLoopTrigger) {
-    console.log('[DEBUG-TEL-2] CASE 2: Already running telegramLoopTrigger - queueing message');
-    console.log('[DEBUG-TEL-2] QUEUE-BEFORE:', telegramMessageQueue.length, 'messages');
-    showToast(`${telegramScenario.name} - Tin nhan vao hang cho...`, 'info');
-
-    // Copy message to clipboard
-    currentTelegramMessage = message;
-    try {
-      await window.electronAPI.setClipboardText(message.content);
-      console.log('[DEBUG-TEL-2] Message copied to clipboard');
-    } catch (error) {
-      console.error('Failed to copy message to clipboard:', error);
-    }
-
-    // Add message to queue for processing after current scenario completes
-    addToTelegramQueue(message);
-
-    return true;
-  }
-
-  // CASE 3: Binh thuong - Kich hoat scenario
-  // Set current message for clipboard processing
+  // Copy message to clipboard
   currentTelegramMessage = message;
-
-  // Copy message content to clipboard for the scenario to use
   try {
     await window.electronAPI.setClipboardText(message.content);
-    console.log('[DEBUG-TEL-2] Message content copied to clipboard');
+    console.log('[DEBUG-TEL] Message copied to clipboard');
   } catch (error) {
     console.error('Failed to copy message to clipboard:', error);
   }
 
-  // Show notification
-  showToast(`📨 "${telegramScenario.name}" received message! Executing...`, 'info');
-  console.log(`[DEBUG-TEL-2] Auto-triggering telegram scenario: ${telegramScenario.name}`);
-
-  // Start the scenario (triggered by telegram)
+  // Start the scenario
+  console.log('[DEBUG-TEL] Starting scenario:', telegramScenario.name);
   await startScenarioExecution(telegramScenario.id, true);
-
-  // KHONG them message vao queue o day - se duoc xu ly trong completeScenarioExecution
 
   return true;
 }
@@ -4345,31 +4699,21 @@ async function checkForNewMessages() {
 
       // Only add if there are new text messages
       if (newMessages.length > 0) {
-        console.log('[DEBUG] Text messages:', newMessages.length, 'First message:', newMessages[0]?.content);
+        console.log('[DEBUG] Text messages:', newMessages.length, 'First:', newMessages[0]?.content?.substring(0, 30));
         // Add to incoming messages for display
         incomingMessages = [...newMessages, ...incomingMessages];
 
-        // Auto-trigger telegram-enabled scenario waiting for message
-        // Track if triggering was successful to avoid duplicate queue additions
-        let triggeringSuccessful = false;
+        // Auto-trigger telegram-enabled scenario
+        // Try to trigger with first message, rest will be queued if scenario is running
+        let triggerResult = false;
         if (newMessages.length > 0) {
-          triggeringSuccessful = await autoTriggerTelegramScenario(newMessages[0]);
-          console.log('[DEBUG] Triggering result:', triggeringSuccessful);
+          triggerResult = await autoTriggerTelegramScenario(newMessages[0]);
         }
 
-        // FIFO Queue Processing: Add messages to queue for telegram-triggered scenarios
-        // Skip the first message if triggering was successful (it was already added)
-        const startIndex = triggeringSuccessful ? 1 : 0;
+        // Queue remaining messages (skip first if trigger was successful)
+        const startIndex = triggerResult ? 1 : 0;
         for (let i = startIndex; i < newMessages.length; i++) {
           addToTelegramQueue(newMessages[i]);
-        }
-
-        // Trigger queue processing if scenario is running with telegram trigger
-        if (runningScenarioId) {
-          const scenario = scenarios.find(s => s.id === runningScenarioId);
-          if (scenario && scenario.triggerByTelegram) {
-            handleTelegramMessageQueue();
-          }
         }
       }
 

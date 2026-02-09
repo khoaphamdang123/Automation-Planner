@@ -210,9 +210,17 @@ function createWindow() {
 
   mainWindow.loadFile('index.html');
 
+  // Mở DevTools để xem console logs
+  mainWindow.webContents.openDevTools();
+
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
   });
+
+  // Capture console logs from renderer process
+  // mainWindow.webContents.on('console-message', (event, message) => {
+  //   console.log('RENDERER LOG:', message);
+  // });
 
   mainWindow.on('closed', () => {
     mainWindow = null;

@@ -375,6 +375,29 @@
                   </label>
                   <span class="setting-hint">Run when Telegram message received</span>
                 </div>
+                <div class="setting-card">
+                  <h4><span class="setting-icon">🔁</span> Loop Telegram Trigger</h4>
+                  <label class="switch">
+                    <input type="checkbox" id="telegramLoopTrigger">
+                    <span class="slider"></span>
+                  </label>
+                  <span class="setting-hint">Run once, wait for Telegram, repeat</span>
+                </div>
+                <div class="setting-card" id="sequenceScenarioCard" style="display: none;">
+                  <h4><span class="setting-icon">📋</span> Sequence Scenario</h4>
+                  <select id="sequenceScenarioSelect" class="setting-select">
+                    <option value="">-- Chon Scenario --</option>
+                  </select>
+                  <span class="setting-hint">Scenario chay sau Loop Telegram Trigger</span>
+                </div>
+                <div class="setting-card">
+                  <h4><span class="setting-icon">🔀</span> Sequence Mode</h4>
+                  <label class="switch">
+                    <input type="checkbox" id="telegramSequenceMode">
+                    <span class="slider"></span>
+                  </label>
+                  <span class="setting-hint">Chay xong → Chay Scenario khac → Doi Telegram</span>
+                </div>
               </div>
 
               <!-- Scenario Actions List -->
@@ -881,6 +904,9 @@
   </div>
 
   <script src="renderer.js"></script>
+  <script>
+    console.log('index.html script executed');
+  </script>
 </body>
 </html>
 

@@ -2,3 +2,7 @@ node_modules
 dist/
 out/
 distt/
+screenshot_*.png
+*.log
+npm-debug.log*
+.DS_Store

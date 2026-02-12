@@ -53,8 +53,7 @@ async function getChatId() {
           console.log(`   Loại: ${chat.type} (bot vừa được thêm/xóa)`);
           console.log('   ---');
         }
-      });
-
+      });  
       console.log('\n✅ Hoàn thành! Copy ChatID bạn cần.');
 
     } else {
@@ -69,3 +68,5 @@ async function getChatId() {
 }
 
 getChatId();
+
+

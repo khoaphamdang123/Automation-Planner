@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Clipboard Actions
   executeSetClipboard: (params) => ipcRenderer.invoke('execute-set-clipboard', params),
   executeReadClipboard: (params) => ipcRenderer.invoke('execute-read-clipboard', params),
+  executePasteClipboard:()=>ipcRenderer.invoke('execute-paste-clipboard'),
 
   // Wait / Sync Actions
   executeWaitClipboardChange: (params) => ipcRenderer.invoke('execute-wait-clipboard-change', params),

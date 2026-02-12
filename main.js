@@ -744,6 +744,37 @@ ipcMain.handle('execute-read-clipboard', async (event, { saveToVariable }) => {
   }
 });
 
+ipcMain.handle('execute-paste-clipboard',async(event)=>{
+    try
+    {
+   if(nut)
+   {   
+
+      await nutKeyboard.pressKey(nut.Key.LeftControl,nut.Key.V);
+
+      await nutKeyboard.releaseKey(nut.Key.LeftControl,nut.Key.V);
+   }
+   else
+   {
+   console.log('Paste clipboard manually');
+   
+   const win = BrowserWindow.getFocusedWindow();
+
+   win.webContents.paste();  
+   }
+     
+    }
+    catch(error)
+    {
+   console.error('Failed to paste clipboard:',error);
+
+   return {success:false,error:error.message};
+    }
+
+    return {success:true};
+
+});
+
 // ===========================================
 // WAIT / SYNCHRONIZATION ACTIONS
 // ===========================================

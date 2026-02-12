@@ -227,6 +227,7 @@ function initializeEventListeners() {
 
   // Pagination
   document.getElementById('prevPageBtn').addEventListener('click', () => changePage(-1));
+  
   document.getElementById('nextPageBtn').addEventListener('click', () => changePage(1));
 
   // Quick Run Scenario Buttons
@@ -1415,6 +1416,7 @@ let isExecutingAction = false;
 let executingActionIndex = -1;
 let executingScenarioId = null;
 let isExecutingSubAction = false;
+let freshTelegramTrigger = false;  // Flag to indicate fresh telegram message (immediate execution)
 
 // Start Scenario Execution
 function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
@@ -1690,9 +1692,11 @@ async function executeNextAction() {
 
         // Restart main actions from beginning
         currentActionIndex = 0;
+        const triggerDelay = freshTelegramTrigger ? 0 : (scenario.actionDelay || 500);
+        freshTelegramTrigger = false;  // Clear the flag after use
         telegramSequenceTimeoutId = setTimeout(() => {
           executeNextAction();
-        }, scenario.actionDelay || 500);
+        }, triggerDelay);
       } else {
         // Queue empty - switch to sub-actions
         const hasSubActions = scenario.subActions && scenario.subActions.length > 0;
@@ -1980,6 +1984,7 @@ async function executeNextSubAction() {
 
 // Execute a single action using nut.js
 async function executeAction(action) {
+console.log('action type:'+action.type);
   switch (action.type) {
     // ===========================================
     // CONTROL FLOW ACTIONS
@@ -2201,6 +2206,10 @@ async function executeAction(action) {
       });
       console.log('Read clipboard result:', readResult);
       break;
+    case 'pasteClipboard':
+    await window.electronAPI.executePasteClipboard();
+    console.log('Paste clipboard result:');
+    break
     // ===========================================
     // WAIT / SYNCHRONIZATION ACTIONS
     // ===========================================
@@ -3054,6 +3063,14 @@ const ACTION_TYPES = {
     description: 'Read clipboard and store it in a variable',
     parameters: [
       { key: 'saveToVariable', label: 'Variable Name', type: 'text', required: true, placeholder: 'clipboardContent', help: 'Name of variable to store clipboard content' }
+    ]
+  },
+  pasteClipboard: 
+  {
+  name:'Paste Clipboard',
+  icon:'📤',
+  description:'Paste Clipboard from clipboard',
+   parameters: [
     ]
   },
   // Wait / Synchronization
@@ -4962,6 +4979,7 @@ async function autoTriggerTelegramScenario(message) {
 
   // Copy message to clipboard
   currentTelegramMessage = message;
+  freshTelegramTrigger = true;  // Mark as fresh trigger for immediate execution
   try {
     await window.electronAPI.setClipboardText(message.content);
     console.log('[DEBUG-TEL] Message copied to clipboard');

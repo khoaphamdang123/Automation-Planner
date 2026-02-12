@@ -47,38 +47,58 @@ let telegramRunningLoopTrigger = false;  // Đang chạy Loop Telegram Trigger s
 let isRunningSubActions = false;  // Đang chạy sub-actions thay vì main actions
 let isScenarioExecutionStopped = false;  // Flag to track if scenario was stopped by ESC or manual stop
 
+// Delay Cancellation State - For interrupting delays when new message arrives
+let currentDelayTimeoutId = null;  // Track current delay timeout for cancellation
+let subActionInterrupted = false;  // Flag to track if sub-action was interrupted by new message
+
+// AbortController for interruptible delays - allows cancelling all delays when new Telegram message arrives
+let delayAbortController = null;  // AbortController for interruptible delays
+
+// Delete Message Modal State
+let deleteMessageModalState = {
+  messageId: null,
+  message: null
+};
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
-  initializeEventListeners();
-  updateStats();
-  initializeTelegramSettings();
-  initializeIncomingMessages();
-  initializeScenarios(); // Initialize scenarios after DOM is ready
+  try {
+    initializeEventListeners();
+    updateStats();
+    initializeTelegramSettings();
+    initializeIncomingMessages();
+    initializeScenarios(); // Initialize scenarios after DOM is ready
+    initializeDeleteMessageModal(); // Initialize delete message modal
 
-  // Set up coordinate recording listeners
-  setupCoordinateRecordingListeners();
-  
-  // ===========================================
-  // APP CLOSE / PAGE UNLOAD HANDLER
-  // ===========================================
-  
-  // Make clearAllMessageQueues globally accessible for main process calls
-  window.clearAllMessageQueues = clearAllMessageQueues;
-  
-  // Clear all queues when page is unloading (app closing)
-  window.addEventListener('beforeunload', () => {
-    console.log('[RENDERER] Page is unloading, clearing all queues...');
-    clearAllMessageQueues();
-  });
-
-  // Listen for app close event from main process
-  if (window.electronAPI && window.electronAPI.onStopAllAutoScript) {
-    window.electronAPI.onStopAllAutoScript((data) => {
-      if (data && data.reason === 'app-close') {
-        console.log('[RENDERER] App is closing, clearing queues...');
-        clearAllMessageQueues();
-      }
+    // Set up coordinate recording listeners
+    setupCoordinateRecordingListeners();
+    
+    // ===========================================
+    // APP CLOSE / PAGE UNLOAD HANDLER
+    // ===========================================
+    
+    // Make clearAllMessageQueues globally accessible for main process calls
+    window.clearAllMessageQueues = clearAllMessageQueues;
+    
+    // Clear all queues when page is unloading (app closing)
+    window.addEventListener('beforeunload', () => {
+      console.log('[RENDERER] Page is unloading, clearing all queues...');
+      clearAllMessageQueues();
     });
+
+    // Listen for app close event from main process
+    if (window.electronAPI && window.electronAPI.onStopAllAutoScript) {
+      window.electronAPI.onStopAllAutoScript((data) => {
+        if (data && data.reason === 'app-close') {
+          console.log('[RENDERER] App is closing, clearing queues...');
+          clearAllMessageQueues();
+        }
+      });
+    }
+    
+    console.log('[RENDERER] Initialization completed successfully');
+  } catch (error) {
+    console.error('[RENDERER] Initialization error:', error);
   }
 });
 
@@ -1506,7 +1526,10 @@ function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
   loopIterationCount = 0;
 
   // Auto minimize window when starting scenario
+  if(isAutomationRunning)
+  {
   window.electronAPI.minimizeWindow();
+  }
 
   // For telegram scenarios triggered by telegram, copy message to clipboard
   // (already done in autoTriggerTelegramScenario)
@@ -1665,35 +1688,29 @@ async function executeNextAction() {
         currentTelegramMessage = null;
         console.log('[DEBUG-EXEC] Clipboard cleared');
       }
-      
-      // Check if there are new messages in the queue
-      const hasMessages = hasQueuedMessages(scenario);
 
-      if (hasMessages) {
-        // Queue has messages - continue with main actions
-        console.log('[DEBUG-EXEC] New messages detected in queue - continuing main actions');
-        showToast(`${scenario.name} - New message detected, continuing...`, 'info');
+      // Check if there are new messages in the queue (FIFO processing)
+      const hasQueuedForProcessing = hasQueuedMessagesForProcessing(scenario);
 
-        // Get message from queue
-        let queuedMessage = null;
-        if (telegramMessageQueue.length > 0) {
-          console.log("Get message from telegram message queue");
-          queuedMessage = telegramMessageQueue.shift();
-        } else if (scenario.messageQueue && scenario.messageQueue.length > 0) {
-          console.log("Get message from scenario message queue");
-          queuedMessage = scenario.messageQueue.shift();
-        }
+      if (hasQueuedForProcessing) {
+        // Queue has messages - process all of them in FIFO order
+        console.log('[DEBUG-EXEC] Messages detected in queue - processing in FIFO order');
+
+        // Process the NEXT queued message
+        const queuedMessage = getNextQueuedMessage(scenario);
 
         if (queuedMessage) {
+          console.log('[DEBUG-EXEC] Processing next queued message');
           currentTelegramMessage = queuedMessage;
-          window.electronAPI.setClipboardText(queuedMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
-          console.log('[DEBUG-EXEC] New message copied to clipboard');
+          await window.electronAPI.setClipboardText(queuedMessage.content);
+          console.log('[DEBUG-EXEC] Next message copied to clipboard');
         }
 
-        // Restart main actions from beginning
+        // Clear clipboard and continue with next message actions
         currentActionIndex = 0;
+
         const triggerDelay = freshTelegramTrigger ? 0 : (scenario.actionDelay || 500);
-        freshTelegramTrigger = false;  // Clear the flag after use
+        freshTelegramTrigger = false;
         telegramSequenceTimeoutId = setTimeout(() => {
           executeNextAction();
         }, triggerDelay);
@@ -1801,6 +1818,42 @@ function hasQueuedMessages(scenario = null) {
   return false;
 }
 
+// Helper function to get next queued message (FIFO)
+function getNextQueuedMessage(scenario = null) {
+  // Priority 1: Global telegram queue
+  if (telegramMessageQueue && telegramMessageQueue.length > 0) {
+    const msg = telegramMessageQueue.shift();
+    console.log(`[DEBUG-FIFO] Got message from global queue: "${msg?.content?.substring(0, 30)}..."`);
+    console.log(`[DEBUG-FIFO] Remaining in global queue: ${telegramMessageQueue.length}`);
+    return msg;
+  }
+
+  // Priority 2: Scenario-specific queue
+  if (scenario && scenario.messageQueue && scenario.messageQueue.length > 0) {
+    const msg = scenario.messageQueue.shift();
+    console.log(`[DEBUG-FIFO] Got message from scenario queue: "${msg?.content?.substring(0, 30)}..."`);
+    console.log(`[DEBUG-FIFO] Remaining in scenario queue: ${scenario.messageQueue.length}`);
+    return msg;
+  }
+
+  return null;
+}
+
+// Helper function to check if there are queued messages FOR PROCESSING (excludes current message)
+function hasQueuedMessagesForProcessing(scenario = null) {
+  // Check global telegram queue
+  if (telegramMessageQueue && telegramMessageQueue.length > 0) {
+    return true;
+  }
+
+  // Check scenario-specific queue if scenario is provided
+  if (scenario && scenario.messageQueue && scenario.messageQueue.length > 0) {
+    return true;
+  }
+
+  return false;
+}
+
 // Execute Next Sub-Action (for telegramLoopTrigger when queue is empty)
 async function executeNextSubAction() {
   // Safety check: Don't run sub-actions if main actions should be running
@@ -1838,24 +1891,21 @@ async function executeNextSubAction() {
   }
 
   // Check queue BEFORE each sub-action - if messages arrived, switch to main actions
-  if (hasQueuedMessages(scenario)) {
-    console.log('[DEBUG-EXEC-SUB] Messages detected before sub-action - switching to main actions');
+  const hasQueuedForProcessing = hasQueuedMessagesForProcessing(scenario);
+
+  if (hasQueuedForProcessing) {
+    console.log('[DEBUG-EXEC-SUB] Messages detected in queue - switching to main actions');
     isRunningSubActions = false;
-    
-    // Extract message from queue and copy to clipboard
-    let queuedMessage = null;
-    if (telegramMessageQueue.length > 0) {
-      queuedMessage = telegramMessageQueue.shift();
-    } else if (scenario.messageQueue && scenario.messageQueue.length > 0) {
-      queuedMessage = scenario.messageQueue.shift();
-    }
-    
+
+    // Get next queued message
+    const queuedMessage = getNextQueuedMessage(scenario);
+
     if (queuedMessage) {
       currentTelegramMessage = queuedMessage;
       window.electronAPI.setClipboardText(queuedMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
-      console.log('[DEBUG-EXEC-SUB] Message copied to clipboard from queue');
+      console.log('[DEBUG-EXEC-SUB] Next queued message copied to clipboard');
     }
-    
+
     currentActionIndex = 0;
     telegramSequenceRunning = false;
     executeNextAction();
@@ -1867,26 +1917,23 @@ async function executeNextSubAction() {
   // Check if we've completed all sub-actions - loop infinitely when no messages
   if (currentActionIndex >= subActions.length) {
     console.log('[DEBUG-EXEC-SUB] All sub-actions completed - checking queue');
-    
+
     // Check queue - if messages arrived, switch to main actions
-    if (hasQueuedMessages(scenario)) {
-      console.log('[DEBUG-EXEC-SUB] Messages detected - switching to main actions');
+    const hasQueuedForProcessing = hasQueuedMessagesForProcessing(scenario);
+
+    if (hasQueuedForProcessing) {
+      console.log('[DEBUG-EXEC-SUB] Messages detected in queue - processing in FIFO order');
       isRunningSubActions = false;
-      
-      // Extract message from queue and copy to clipboard
-      let queuedMessage = null;
-      if (telegramMessageQueue.length > 0) {
-        queuedMessage = telegramMessageQueue.shift();
-      } else if (scenario.messageQueue && scenario.messageQueue.length > 0) {
-        queuedMessage = scenario.messageQueue.shift();
-      }
-      
+
+      // Get next queued message
+      const queuedMessage = getNextQueuedMessage(scenario);
+
       if (queuedMessage) {
         currentTelegramMessage = queuedMessage;
         window.electronAPI.setClipboardText(queuedMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
-        console.log('[DEBUG-EXEC-SUB] Message copied to clipboard');
+        console.log('[DEBUG-EXEC-SUB] Next queued message copied to clipboard');
       }
-      
+
       currentActionIndex = 0;
       telegramSequenceRunning = false;
       executeNextAction();
@@ -1939,25 +1986,22 @@ async function executeNextSubAction() {
     currentActionIndex++;
 
     // AFTER completing sub-action: Check queue
-    if (hasQueuedMessages(scenario)) {
+    const hasQueuedForProcessing = hasQueuedMessagesForProcessing(scenario);
+
+    if (hasQueuedForProcessing) {
       // Messages arrived - switch to main actions
-      console.log('[DEBUG-EXEC-SUB] Messages detected after sub-action - switching to main actions');
+      console.log('[DEBUG-EXEC-SUB] Messages detected in queue - switching to main actions');
       isRunningSubActions = false;
-      
-      // Extract message from queue and copy to clipboard
-      let queuedMessage = null;
-      if (telegramMessageQueue.length > 0) {
-        queuedMessage = telegramMessageQueue.shift();
-      } else if (scenario.messageQueue && scenario.messageQueue.length > 0) {
-        queuedMessage = scenario.messageQueue.shift();
-      }
-      
+
+      // Get next queued message
+      const queuedMessage = getNextQueuedMessage(scenario);
+
       if (queuedMessage) {
         currentTelegramMessage = queuedMessage;
         window.electronAPI.setClipboardText(queuedMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
-        console.log('[DEBUG-EXEC-SUB] Message copied to clipboard from queue');
+        console.log('[DEBUG-EXEC-SUB] Next queued message copied to clipboard');
       }
-      
+
       currentActionIndex = 0;
       telegramSequenceRunning = false;
       executeNextAction();
@@ -2079,15 +2123,27 @@ console.log('action type:'+action.type);
       const delayBetweenCoordsMs = parseInt(action.parameters.delayBetweenCoordsMs) || 200;
 
       // Execute click at each recorded position
+      const clickCount = parseInt(action.parameters.clickCount) || 1;
+      const delayBetweenClicksMs = parseInt(action.parameters.delayBetweenClicksMs) || 0;
+      
       for (let i = 0; i < clickCoords.length; i++) {
         const coord = clickCoords[i];
-        console.log(`[DEBUG-CLICK] Clicking at (${coord.x}, ${coord.y})`);
-        await window.electronAPI.executeMouseClick({
-          x: parseInt(coord.x) || 0,
-          y: parseInt(coord.y) || 0,
-          button: action.parameters.button || 'left',
-          clickCount: action.parameters.clickCount || 1
-        });
+        console.log(`[DEBUG-CLICK] Clicking at (${coord.x}, ${coord.y}) - ${clickCount} times`);
+        
+        // Execute multiple clicks at the same coordinate with delay between each click
+        for (let clickNum = 0; clickNum < clickCount; clickNum++) {
+          await window.electronAPI.executeMouseClick({
+            x: parseInt(coord.x) || 0,
+            y: parseInt(coord.y) || 0,
+            button: action.parameters.button || 'left',
+            clickCount: 1  // Always send 1, we handle the loop ourselves
+          });
+          
+          // Add delay between each single click (not after the last click)
+          if (clickNum < clickCount - 1 && delayBetweenClicksMs > 0) {
+            await delay(delayBetweenClicksMs);
+          }
+        }
 
         // Add delay between different coordinates (not after the last one)
         if (i < clickCoords.length - 1 && delayBetweenCoordsMs > 0) {
@@ -2303,19 +2359,20 @@ function isValidSerialNumber(content) {
   if (!content || typeof content !== 'string') {
     return false;
   }
-  
   // Remove all non-digit characters
   const digitsOnly = content.replace(/\D+/g, '');
-  
+    
   // Check if original content only contains digits AND length > 10
   const isOnlyNumbers = /^\d+$/.test(content);
+  
   const hasValidLength = digitsOnly.length > 10;
   
+  if(hasValidLength)
+  {
   console.log(`[VALIDATE] Content: "${content}", OnlyNumbers: ${isOnlyNumbers}, DigitsLength: ${digitsOnly.length}`);
-  
+  }
+
   sendErrorLogToTelegram(`Valid Serial Number:\nContent: "${content}"\nLength: ${content?.length || 0}\nDigits: ${content?.replace(/\D+/g, '').length || 0}`);
-
-
 
   return isOnlyNumbers && hasValidLength;
 }
@@ -2323,21 +2380,40 @@ function isValidSerialNumber(content) {
 // Add a message to the FIFO queue
 function addToTelegramQueue(message) {
   const content = message.content || message;
-  
+
   console.log('[ADD-QUEUE] Adding message:', content?.substring(0, 50));
-  
+
   // Validate serial number
   if (!isValidSerialNumber(content)) {
     console.log('[ADD-QUEUE] Invalid serial number - not adding to queue');
     showToast('Invalid serial number - must be only numbers with length > 10', 'error');
-    
+
     // Send error log to Telegram
     sendErrorLogToTelegram(`Invalid serial number received:\nContent: "${content}"\nLength: ${content?.length || 0}\nDigits: ${content?.replace(/\D+/g, '').length || 0}`);
     return false;
   }
-  
-  telegramMessageQueue.push(message);
-  showToast(`📥 Message queued (${telegramMessageQueue.length} pending)`, 'info');
+
+  const telegramScenario = scenarios.find(s =>
+    (s.triggerByTelegram || s.telegramLoopTrigger) &&
+    s.actions &&
+    s.actions.length > 0
+  );  
+
+
+  if (telegramScenario && telegramScenario.telegramLoopTrigger) {
+    if (!telegramScenario.messageQueue) {
+      telegramScenario.messageQueue = [];
+    }
+    telegramScenario.messageQueue.push(message);
+    console.log(`[ADD-QUEUE] Added to scenario queue. Total: ${telegramScenario.messageQueue.length}`);
+  } else {
+    telegramMessageQueue.push(message);
+    console.log(`[ADD-QUEUE] Added to global queue. Total: ${telegramMessageQueue.length}`);
+  }
+
+  console.log(`[ADD-QUEUE] runningScenarioId: ${runningScenarioId}, currentTelegramMessage: ${currentTelegramMessage ? 'set' : 'null'}`);
+
+  showToast(`Message queued`, 'info');
 
   return true;
 }
@@ -2352,10 +2428,9 @@ async function processNextTelegramMessage() {
   let telegramScenario = null;
 
   if (runningScenarioId) {
-    // Scenario is currently running, use it
     telegramScenario = scenarios.find(s => s.id === runningScenarioId && (s.triggerByTelegram || s.telegramLoopTrigger));
-  } else {
-    // Scenario is not running, find a telegram-triggered scenario
+  } else 
+  {
     telegramScenario = scenarios.find(s =>
       (s.triggerByTelegram || s.telegramLoopTrigger) &&
       s.actions &&
@@ -2380,7 +2455,7 @@ async function processNextTelegramMessage() {
     return;
   }
 
-  showToast(`📋 Processing: "${currentTelegramMessage.content.substring(0, 30)}..."`, 'info');
+  showToast(`Processing: "${currentTelegramMessage.content.substring(0, 30)}..."`, 'info');
 
   // Copy message to clipboard
   await window.electronAPI.setClipboardText(currentTelegramMessage.content);
@@ -2417,9 +2492,84 @@ async function handleTelegramMessageQueue() {
 // HELPER FUNCTIONS
 // ===========================================
 
-// Helper function to delay execution
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+// Interruptible delay function - can be aborted when new Telegram message arrives
+// Usage: await interruptibleDelay(ms) or await interruptibleDelay(ms, delayAbortController?.signal)
+function interruptibleDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(resolve, ms);
+    
+    const abortHandler = () => {
+      clearTimeout(timeout);
+      reject(new Error('Delay aborted'));
+    };
+    
+    // If signal is provided and already aborted, reject immediately
+    if (signal?.aborted) {
+      abortHandler();
+      return;
+    }
+    
+    // Listen for abort event
+    if (signal) {
+      signal.addEventListener('abort', abortHandler, { once: true });
+    }
+  });
+}
+
+// Create a new AbortController for the next delay sequence
+function createDelayAbortController() {
+  // Abort any existing controller first
+  if (delayAbortController) {
+    delayAbortController.abort();
+  }
+  delayAbortController = new AbortController();
+  return delayAbortController;
+}
+
+// Helper function to delay execution with cancellation support
+// When new message arrives during sub-action execution, the delay will be cancelled
+// and the sub-action will be stopped immediately to run main action
+function delay(ms, options = {}) {
+  const signal = delayAbortController?.signal;
+  
+  // If we have an abort controller, use interruptible delay
+  if (signal) {
+    return interruptibleDelay(ms, signal).then(() => {
+      // Delay completed normally
+    }).catch((error) => {
+      if (error.message === 'Delay aborted') {
+        // Signal that delay was interrupted - resolve normally to allow code to continue
+        console.log('[DELAY] Interrupted by new Telegram message');
+        return;
+      }
+      throw error;
+    });
+  }
+  
+  // Fallback to original behavior if no abort controller
+  const { checkInterval = 100 } = options; // Check for interruption every 100ms by default
+  
+  return new Promise(resolve => {
+    // Set the global timeout ID for cancellation
+    currentDelayTimeoutId = setTimeout(() => {
+      currentDelayTimeoutId = null;
+      resolve();
+    }, ms);
+    
+    // Store the timeout ID in the promise for external access
+    currentDelayTimeoutId._isDelayTimeout = true;
+  });
+}
+
+// Helper function to cancel any ongoing delay
+function cancelDelay() {
+  if (currentDelayTimeoutId) {
+    console.log('[DELAY-CANCEL] Cancelling ongoing delay');
+    clearTimeout(currentDelayTimeoutId);
+    currentDelayTimeoutId = null;
+    return true;
+  }
+  return false;
 }
 
 // Complete Scenario Execution
@@ -2826,7 +2976,9 @@ function runScenario() {
   }
 
   // Minimize window immediately when running scenario
-  window.electronAPI.minimizeWindow();
+ if(isAutomationRunning)
+ {  window.electronAPI.minimizeWindow();
+ }
 
   // Start scenario execution
   startScenarioExecution(selectedScenarioId);
@@ -3001,7 +3153,8 @@ const ACTION_TYPES = {
         { value: 'right', label: 'Right Button' },
         { value: 'middle', label: 'Middle Button' }
       ], default: 'left' },
-      { key: 'clickCount', label: 'Click Count', type: 'number', required: true, min: 1, max: 10, default: 1, help: 'Number of times to click per coordinate' },
+      { key: 'clickCount', label: 'Click Count', type: 'number', required: true, min: 1, max: 999999, default: 1, help: 'Number of times to click per coordinate (unlimited)' },
+      { key: 'delayBetweenClicksMs', label: 'Delay Between Clicks (ms)', type: 'number', required: false, min: 0, default: 0, help: 'Delay between each click at the same coordinate' },
       { key: 'delayBetweenCoordsMs', label: 'Delay Between Coordinates (ms)', type: 'number', required: false, min: 0, default: 200, help: 'Delay between clicking different coordinates' },
       { key: 'delayAfterMs', label: 'Delay After (ms)', type: 'number', required: false, min: 0, default: 0, help: 'Delay after all clicks (milliseconds)' }
     ]
@@ -4551,6 +4704,11 @@ function disconnectTelegram() {
   if (confirm('Are you sure you want to disconnect the Telegram bot?')) {
     telegramSettings.connected = false;
     updateTelegramStatusCard();
+    
+    // Clear processed message IDs so they can be reprocessed on reconnect
+    processedTelegramMessageIds.clear();
+    telegramOffset = 0;
+    
     showToast('Telegram bot disconnected', 'info');
 
     // Add a notification
@@ -4875,6 +5033,7 @@ let telegramMessageQueue = [];
 let isProcessingTelegramQueue = false;
 let currentTelegramMessage = null;
 let telegramOffset = 0;
+let processedTelegramMessageIds = new Set(); // Track processed message IDs to prevent duplicates
 
 // Auto-trigger telegram-enabled scenario when new message arrives
 async function autoTriggerTelegramScenario(message) {
@@ -4882,6 +5041,9 @@ async function autoTriggerTelegramScenario(message) {
   console.log('[DEBUG-TEL] message:', message?.content?.substring(0, 50));
   console.log('[DEBUG-TEL] runningScenarioId:', runningScenarioId);
   console.log('[DEBUG-TEL] isAutomationRunning:', isAutomationRunning);
+
+  // Create new AbortController to interrupt any ongoing delays
+  createDelayAbortController();
 
   // Check if automation is running
   if (!isAutomationRunning) {
@@ -4905,9 +5067,60 @@ async function autoTriggerTelegramScenario(message) {
   console.log('[DEBUG-TEL] Found scenario:', telegramScenario.name);
   console.log('[DEBUG-TEL] runningScenarioId:', runningScenarioId, 'scenario.id:', telegramScenario.id);
 
-  // CASE 1: Scenario is currently running
+  // CASE 1: Same scenario is currently running - interrupt sub-actions and process new message immediately
   if (runningScenarioId === telegramScenario.id) {
-    console.log('[DEBUG-TEL] Scenario is running, queueing message to scenario queue');
+    // If sub-actions are running, interrupt them to process new message immediately
+    if (isRunningSubActions) {
+      console.log('[DEBUG-TEL] Sub-actions running - interrupting and processing new message');
+      
+      // Set interrupt flag to stop sub-actions
+      telegramSequenceInterrupted = true;
+      
+      // Clear any pending timeout to stop scheduled sub-actions
+      if (telegramSequenceTimeoutId) {
+        clearTimeout(telegramSequenceTimeoutId);
+        telegramSequenceTimeoutId = null;
+      }
+      
+      // Abort any ongoing delays
+      createDelayAbortController();
+      
+      // Reset sub-action flags
+      isRunningSubActions = false;
+      isExecutingSubAction = false;
+      
+      // Validate serial number
+      const content = message.content || message;
+      if (!isValidSerialNumber(content)) {
+        console.log('[DEBUG-TEL] Invalid serial number - not processing message');
+        showToast('Invalid serial number - must be only numbers with length > 10', 'error');
+        sendErrorLogToTelegram(`Invalid serial number received:\nContent: "${content}"\nLength: ${content?.length || 0}`);
+        return true;
+      }
+      
+      // Process new message immediately - set as current message
+      currentTelegramMessage = message;
+      freshTelegramTrigger = true;
+      
+      // Copy to clipboard
+      try {
+        await window.electronAPI.setClipboardText(message.content);
+        console.log('[DEBUG-TEL] New message copied to clipboard, starting main actions');
+      } catch (error) {
+        console.error('Failed to copy message to clipboard:', error);
+      }
+      
+      // Reset action index and start main actions
+      currentActionIndex = 0;
+      telegramSequenceRunning = false;
+      
+      // Start main actions
+      await startScenarioExecution(telegramScenario.id, true);
+      return true;
+    }
+    
+    // If main actions are running (not sub-actions), queue the message
+    console.log('[DEBUG-TEL] Main actions running, queueing message to scenario queue');
     
     // Validate serial number before adding
     const content = message.content || message;
@@ -4940,9 +5153,13 @@ async function autoTriggerTelegramScenario(message) {
         telegramSequenceTimeoutId = null;
       }
 
+      // Abort any ongoing delays
+      createDelayAbortController();
+
       // Reset all flags for fresh start of main actions
       telegramSequenceRunning = false;
       isRunningSubActions = false;
+      isExecutingSubAction = false;
 
       // Continue to start the telegram scenario
     } else {
@@ -5030,22 +5247,41 @@ async function checkForNewMessages() {
           unread: true
         }));
 
+      // Filter out already processed messages to prevent duplicates
+      const uniqueMessages = newMessages.filter(msg => {
+        if (processedTelegramMessageIds.has(msg.id)) {
+          console.log('[DEBUG] Skipping already processed message:', msg.id);
+          return false;
+        }
+        return true;
+      });
+
       // Only add if there are new text messages
-      if (newMessages.length > 0) {
-        console.log('[DEBUG] Text messages:', newMessages.length, 'First:', newMessages[0]?.content?.substring(0, 30));
+      if (uniqueMessages.length > 0) {
+        console.log('[DEBUG] Text messages:', uniqueMessages.length, 'First:', uniqueMessages[0]?.content?.substring(0, 30));
+        
+        // Mark these messages as processed
+        uniqueMessages.forEach(msg => processedTelegramMessageIds.add(msg.id));
+        
+        // Periodic cleanup: if too many message IDs tracked, clear old ones
+        if (processedTelegramMessageIds.size > 1000) {
+          console.log('[DEBUG] Clearing old processed message IDs');
+          processedTelegramMessageIds.clear();
+        }
+        
         // Add to incoming messages for display
-        incomingMessages = [...newMessages, ...incomingMessages];
+        incomingMessages = [...uniqueMessages, ...incomingMessages];
 
         // Auto-trigger telegram-enabled scenario
         // Try to trigger with first message, rest will be queued if scenario is running
         let triggerResult = false;
-        if (newMessages.length > 0) {
-          triggerResult = await autoTriggerTelegramScenario(newMessages[0]);
+        if (uniqueMessages.length > 0) {
+          triggerResult = await autoTriggerTelegramScenario(uniqueMessages[0]);
         }
 
         // Queue remaining messages (skip first if trigger was successful)
         const startIndex = triggerResult ? 1 : 0;
-        for (let i = startIndex; i < newMessages.length; i++) {
+        for (let i = startIndex; i < uniqueMessages.length; i++) {
           addToTelegramQueue(newMessages[i]);
         }
       }
@@ -5073,7 +5309,43 @@ function clearAllMessages() {
 }
 
 function deleteMessage(messageId) {
-  if (confirm('Delete this message?')) {
+  // Find the message
+  const message = incomingMessages.find(m => m.id === messageId);
+  if (!message) return;
+
+  // Store message details
+  deleteMessageModalState.messageId = messageId;
+  deleteMessageModalState.message = message;
+
+  // Format message preview
+  const messagePreview = document.getElementById('deleteMessagePreview');
+  const messageDetails = document.getElementById('deleteMessageDetails');
+
+  const time = new Date(message.time).toLocaleString();
+  const messageTypeIcon = getMessageTypeIcon(message.type);
+
+  messagePreview.innerHTML = `
+    <div class="message-sender">
+      <span class="sender-name">${escapeHtml(message.sender)}</span>
+      <span class="sender-username">${escapeHtml(message.username || '')}</span>
+    </div>
+    <div class="message-content">"${escapeHtml(message.content.length > 100 ? message.content.substring(0, 100) + '...' : message.content)}"</div>
+  `;
+
+  messageDetails.innerHTML = `
+    <span class="message-time">🕐 ${time}</span>
+    <span class="message-type">${messageTypeIcon} ${message.type}</span>
+  `;
+
+  // Show modal
+  const deleteMessageModal = document.getElementById('deleteMessageModal');
+  deleteMessageModal.classList.add('active');
+}
+
+function confirmDeleteMessage() {
+  const messageId = deleteMessageModalState.messageId;
+  
+  if (messageId) {
     incomingMessages = incomingMessages.filter(msg => msg.id !== messageId);
     saveMessages();
 
@@ -5086,6 +5358,55 @@ function deleteMessage(messageId) {
 
     showToast('Message deleted', 'success');
   }
+
+  // Close modal
+  closeDeleteMessageModal();
+}
+
+function closeDeleteMessageModal() {
+  const deleteMessageModal = document.getElementById('deleteMessageModal');
+  deleteMessageModal.classList.remove('active');
+
+  // Reset state
+  deleteMessageModalState.messageId = null;
+  deleteMessageModalState.message = null;
+}
+
+function initializeDeleteMessageModal() {
+  const deleteMessageModal = document.getElementById('deleteMessageModal');
+  const closeBtn = document.getElementById('closeDeleteMessageModalBtn');
+  const cancelBtn = document.getElementById('cancelDeleteMessageBtn');
+  const confirmBtn = document.getElementById('confirmDeleteMessageBtn');
+
+  // Close button
+  closeBtn.addEventListener('click', () => {
+    closeDeleteMessageModal();
+  });
+
+  // Cancel button
+  cancelBtn.addEventListener('click', () => {
+    closeDeleteMessageModal();
+  });
+
+  // Confirm delete button
+  confirmBtn.addEventListener('click', () => {
+    confirmDeleteMessage();
+  });
+
+  // Click outside to close
+  deleteMessageModal.addEventListener('click', (e) => {
+    if (e.target === deleteMessageModal) {
+      closeDeleteMessageModal();
+    }
+  });
+
+  // Escape key to close
+  document.addEventListener('keydown', function handleEscape(e) {
+    if (e.key === 'Escape' && deleteMessageModal.classList.contains('active')) {
+      closeDeleteMessageModal();
+      document.removeEventListener('keydown', handleEscape);
+    }
+  });
 }
 
 // Reply to message
@@ -5124,7 +5445,7 @@ function startMessagePolling() {
       await checkForNewMessages();
       renderMessagesTable();
     }
-  }, 5000);
+  }, 1000);
 }
 
 // Stop message polling
@@ -5165,6 +5486,7 @@ function updateTelegramStatusCard() {
 
 // Make functions available globally
 window.replyToMessage = replyToMessage;
+
 window.deleteMessage = deleteMessage;
 
 

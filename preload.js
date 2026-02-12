@@ -12,6 +12,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Clear all queues on app close
   clearQueuesOnClose: () => ipcRenderer.invoke('clear-queues-on-close'),
 
+  // Interrupt execution (for telegram message interruption)
+  interruptExecution: () => ipcRenderer.invoke('interrupt-execution'),
+  resetInterruptFlag: () => ipcRenderer.invoke('reset-interrupt-flag'),
+
   // ===========================================
   // NUT.JS ACTION HANDLERS
   // ===========================================

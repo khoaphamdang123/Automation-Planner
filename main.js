@@ -119,7 +119,7 @@ console.log('ini hite');
       {
         mainWindow.restore();
         mainWindow.focus();
-        mainWindow.webContents.send('stop-all-auto-script', true);
+        mainWindow.webContents.send('stop-all-auto-script', true);        
       }
     }
  
@@ -140,7 +140,6 @@ console.log('ini hite');
         mainWindow.restore();
         mainWindow.focus();
       }
-      
       
       // Notify renderer that recording was stopped via keyboard
       if (mainWindow) {
@@ -167,6 +166,7 @@ try
 setInterval(async () => {
    try {
     const token = global_log_chatToken;
+
     const targetChatId = global_log_chatId;
 
     if (!token || !targetChatId) {
@@ -175,6 +175,7 @@ setInterval(async () => {
     }
 
     const timestamp = new Date().toLocaleString();
+
     const formattedMessage = `<b>Check Online Log</b>\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       `📅 <b>Time:</b> ${timestamp}\n` +
@@ -316,13 +317,21 @@ function createWindow() {
 
   mainWindow.loadFile('index.html');
 
-  mainWindow.webContents.openDevTools();
+  //mainWindow.webContents.openDevTools();
 
   
   mainWindow.once('ready-to-show', () => {
-    mainWindow.show();    
+   mainWindow.show();    
    setupKeyboardHook();   
-   uIOhook.start();
+   
+   // Start uIOhook with error handling to prevent app freeze
+   try {
+     uIOhook.start();
+     console.log('[APP] uIOhook started successfully');
+   } catch (error) {
+     console.error('[APP] Failed to start uIOhook:', error);
+   }
+   
    checkOnline();
   });
 
@@ -663,7 +672,7 @@ ipcMain.handle('execute-key-press', async (event, { key }) => {
 
       let nutKey = nutKeyMap[key.toLowerCase()] || key;
       await nutKeyboard.pressKey(nutKey);
-      await nutKeyboard.releaseKey(nutKey);
+      await nutKeyboard.releaseKey(nutKey);      
       return { success: true };
     }
     // Fallback to robotjs
@@ -794,7 +803,9 @@ ipcMain.handle('execute-wait-clipboard-change', async (event, { timeoutMs }) => 
       }
     }
     console.log('Clipboard change timeout');
+
     return { success: true, changed: false };
+
   } catch (error) {
     console.error('Failed to wait for clipboard change:', error);
     return { success: false, error: error.message };
@@ -1055,7 +1066,8 @@ ipcMain.handle('get-telegram-updates', async (event, { token, chatId, offset = 0
         return true;
       });
       let latestOffset = offset;
-      if (result.result.length > 0) latestOffset = Math.max(...result.result.map(u => u.update_id)) + 1;
+      // Calculate offset based on filtered updates only to avoid skipping messages from target chat
+      if (chatUpdates.length > 0) latestOffset = Math.max(...chatUpdates.map(u => u.update_id)) + 1;
       return { success: true, updates: chatUpdates.map(update => ({
         id: update.update_id, time: new Date(update.message.date * 1000),
         sender: update.message.from.first_name + (update.message.from.last_name ? ' ' + update.message.from.last_name : ''),

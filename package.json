@@ -52,7 +52,7 @@
       "!distt/*"
     ],
     "directories": {
-      "output": "distt"
+      "output": "disttt"
     }
   }
 }

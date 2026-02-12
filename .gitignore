@@ -2,6 +2,7 @@ node_modules
 dist/
 out/
 distt/
+disttt/
 screenshot_*.png
 *.log
 npm-debug.log*

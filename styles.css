@@ -1102,6 +1102,63 @@ input:checked + .slider:before {
   word-break: break-word;
 }
 
+.delete-message-preview {
+  background: var(--bg-dark);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.delete-message-preview .message-sender {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.delete-message-preview .message-sender .sender-name {
+  font-weight: 600;
+}
+
+.delete-message-preview .message-sender .sender-username {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 12px;
+}
+
+.delete-message-preview .message-content {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  word-break: break-word;
+  padding: 12px;
+  background: var(--bg-card);
+  border-radius: 8px;
+  font-style: italic;
+}
+
+.delete-message-details {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  border-top: 1px solid var(--border-color);
+}
+
+.delete-message-details .message-time,
+.delete-message-details .message-type {
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .delete-modal-actions {
   display: flex;
   gap: 12px;

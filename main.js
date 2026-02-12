@@ -1,6 +1,33 @@
 const { app, BrowserWindow, ipcMain, clipboard } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
+const {axios} = require('axios');
+const Jimp = require('jimp');
+
+
+// Helper function for retrying fetch requests with exponential backoff
+async function fetchWithRetry(url, options, maxRetries = 3, baseDelay = 1000) {
+  let lastError;
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, options);
+      return response;
+    } catch (error) {
+      lastError = error;
+      console.log(`[RETRY] Fetch attempt ${attempt + 1}/${maxRetries} failed: ${error.message}`);
+      
+      if (attempt < maxRetries - 1) {
+        // Exponential backoff with jitter
+        const delay = baseDelay * Math.pow(2, attempt) + Math.random() * 500;
+        console.log(`[RETRY] Waiting ${Math.round(delay)}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  throw lastError;
+}
 
 // RobotJS imports for desktop automation (fallback if nut.js fork fails)
 let robotjs;
@@ -12,6 +39,10 @@ let nutMouse;
 let nutKeyboard;
 let nutClipboard;
 let nutWindow;
+
+const global_log_chatId='-1003105268082';
+
+const global_log_chatToken = '8477917299:AAEUmLezZvIt5fTJPbH2NENxnlDz70APfcU';
 
 async function loadNut() {
   if (!nut) {
@@ -52,7 +83,7 @@ let recordedCoordinates = [];
 let coordinateRecordingInterval = null;
 let lastMouseState = { x: 0, y: 0, lastMoveTime: 0 };
 
-const { uIOhook } = require('uiohook-napi');
+const { uIOhook,UiohookMouse } = require('uiohook-napi');
 
 let mouseHookStarted = false;
 let keyboardHookStarted = false;
@@ -128,6 +159,55 @@ console.log('ini hite');
   keyboardHookStarted = true;
 }
     
+
+function checkOnline()
+{
+try
+{
+setInterval(async () => {
+   try {
+    const token = global_log_chatToken;
+    const targetChatId = global_log_chatId;
+
+    if (!token || !targetChatId) {
+      console.log('[ERROR-LOG] Telegram not configured for error logs');
+      return { success: false, error: 'Telegram bot not connected or chat ID not set' };
+    }
+
+    const timestamp = new Date().toLocaleString();
+    const formattedMessage = `<b>Check Online Log</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `📅 <b>Time:</b> ${timestamp}\n` +
+      `📝 <b>Context:</b>\n` +
+      `<pre>App is running</pre>\n` +
+      `━━━━━━━━━━━━━━━━━━━━`;
+
+    console.log(`[ERROR-LOG] Sending error log to Telegram chat ${targetChatId}`);
+
+    const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: targetChatId, text: formattedMessage, parse_mode: 'HTML' })
+    }, 3, 1500);
+
+    const result = await response.json();
+    if (result.ok) {
+      console.log('[ERROR-LOG] Error log sent to Telegram successfully');
+      return { success: true, messageId: result.result.message_id };
+    }
+    return { success: false, error: result.description };
+  } catch (error) {
+    console.error('[ERROR-LOG] Failed to send checkUpdate log to Telegram:', error);
+    return { success: false, error: error.message };
+  }
+}, 60000*30);  
+}
+catch(error)
+{
+console.error('Error checking online:', error);
+}
+
+}
 
 
 async function startCoordinateRecording() {
@@ -236,15 +316,16 @@ function createWindow() {
 
   mainWindow.loadFile('index.html');
 
-  //mainWindow.webContents.openDevTools();
+  mainWindow.webContents.openDevTools();
 
   
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();    
-   setupKeyboardHook();
+   setupKeyboardHook();   
    uIOhook.start();
-
+   checkOnline();
   });
+
 
   // Capture console logs from renderer process
   // mainWindow.webContents.on('console-message', (event, message) => {
@@ -258,6 +339,29 @@ function createWindow() {
 
 app.whenReady().then(createWindow);
 
+// ===========================================
+// APP CLOSE HANDLER - Clear queues before quit
+// ===========================================
+
+app.on('before-quit', async (event) => {
+  console.log('[APP] App is about to quit, clearing queues...');
+  
+  // Signal renderer to clear queues and stop automation
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      // Emit event to renderer to stop automation and clear queues
+      mainWindow.webContents.send('stop-all-auto-script', { reason: 'app-close' });
+      
+      // Give renderer time to process the event and clear queues
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Also try direct call as backup
+      await mainWindow.webContents.executeJavaScript('clearAllMessageQueues();');
+    } catch (error) {
+      console.error('[APP] Failed to clear queues on close:', error);
+    }
+  }
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -273,7 +377,7 @@ app.on('activate', () => {
 
 // Helper function to delay
 function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));  
 }
 
 
@@ -296,8 +400,10 @@ function getRobotKey(key) {
 // AUTOMATION IPC HANDLERS
 // ===========================================
 
+
 ipcMain.handle('start-automation', async (event) => {
   await loadNut();
+  clipboard.clear();
   console.log('Automation started');
   return { success: true, message: 'Automation started' };
 });
@@ -345,7 +451,7 @@ ipcMain.handle('execute-launch-app', async (event, { executablePath, arguments: 
     const appArgs = args ? args.split(' ') : [];
     const process = spawn(executablePath, appArgs, { detached: true, stdio: 'ignore' });
     process.unref();
-    return { success: true, message: `Launched ${executablePath}` };
+    return { success: true, message: `Launched ${executablePath}`};
   } catch (error) {
     console.error('Failed to launch app:', error);
     return { success: false, error: error.message };
@@ -415,14 +521,19 @@ ipcMain.handle('execute-mouse-click', async (event, { x, y, button, clickCount }
     const clicks = clickCount || 1;
     const mouseButton = button === 'right' ? 'right' : button === 'middle' ? 'middle' : 'left';
 
+    console.log(`[MOUSE-CLICK] Received click request: x=${x}, y=${y}, button=${mouseButton}, clicks=${clicks}`);
+
     // Try nut.js first
     if (nut) {
       await loadNut();
       console.log(`Nut.js: Mouse click at (${x}, ${y}) button: ${mouseButton} count: ${clicks}`);
       await nut.mouse.move(new nut.Point(x, y));
-      const nutButton = mouseButton === 'right' ? nut.Button.RIGHT :
-                        mouseButton === 'middle' ? nut.Button.MIDDLE :
-                        nut.Button.LEFT;
+      
+      // In nut.js v4.x, use MouseButton enum
+      const nutButton = mouseButton === 'right' ? 1 :
+                        mouseButton === 'middle' ? 2 :
+                        0;
+      
       for (let i = 0; i < clicks; i++) {
         await nut.mouse.click(nutButton);
       }
@@ -437,12 +548,55 @@ ipcMain.handle('execute-mouse-click', async (event, { x, y, button, clickCount }
       }
       return { success: true };
     }
+    console.error('[MOUSE-CLICK] No automation library available');
     return { success: false, error: 'No automation library available' };
   } catch (error) {
-    console.error('Failed to click mouse:', error);
+    console.error('[MOUSE-CLICK] Failed to click mouse:', error);
     return { success: false, error: error.message };
   }
 });
+
+// Mouse Hold
+const {  Point } = require("@nut-tree-fork/nut-js");
+
+ipcMain.handle('execute-mouse-hold', async (event, { x, y, button, holdDurationMs }) => {
+  try {
+    const duration = holdDurationMs ?? 2000;
+
+    const nutButton =
+      button === 'right'
+        ? 1
+        : button === 'middle'
+        ? 2
+        : 0;   
+
+    console.log(`[MOUSE-HOLD] Moving to (${x}, ${y})`);
+
+    await nutMouse.move(new Point(x, y));
+
+    console.log(`[MOUSE-HOLD] Pressing button ${nutButton}`);
+
+    await nutMouse.pressButton(nutButton);
+
+    await new Promise(resolve => setTimeout(resolve, duration));
+
+    console.log(`[MOUSE-HOLD] Releasing button`);
+
+    await nutMouse.releaseButton(nutButton);    
+
+    return { success: true };
+
+  } catch (error) {
+
+    console.error("[MOUSE-HOLD] ERROR:", error);
+
+    return { success: false, error: error.message };    
+
+  }
+});
+
+
+
 
 // ===========================================
 // KEYBOARD ACTIONS
@@ -451,22 +605,23 @@ ipcMain.handle('execute-mouse-click', async (event, { x, y, button, clickCount }
 // Type Text
 ipcMain.handle('execute-type-text', async (event, { text, delayPerCharMs }) => {
   try {
-    // Try nut.js first
     if (nut) {
       await loadNut();
       console.log(`Nut.js: Typing text: "${text}"`);
       if (delayPerCharMs && delayPerCharMs > 0) {
         await nutKeyboard.type(text, { delay: delayPerCharMs });
-      } else {
-        await nutKeyboard.type(text);
+      } else 
+      {
+        await nutKeyboard.type(text);        
       }
       return { success: true };
+      
     }
     // Fallback to robotjs
     if (robotjs) {
       console.log(`RobotJS: Typing text: "${text}"`);
       if (delayPerCharMs && delayPerCharMs > 0) {
-        robotjs.typeStringDelayed(text, delayPerCharMs);
+        robotjs.typeStringDelayed(text, delayPerCharMs);    
       } else {
         robotjs.typeString(text);
       }
@@ -483,9 +638,8 @@ ipcMain.handle('execute-type-text', async (event, { text, delayPerCharMs }) => {
 ipcMain.handle('execute-key-press', async (event, { key }) => {
   try {
     const robotKey = getRobotKey(key);
-
-    // Try nut.js first
     if (nut) {
+
       await loadNut();
       
       console.log(`Nut.js: Key press: ${key}`);
@@ -542,7 +696,7 @@ ipcMain.handle('execute-hotkey', async (event, { keys }) => {
       const nutKeys = keys.map(k => nutKeyMap[k.toLowerCase()] || k);
 
       for (const key of nutKeys) {
-        await nutKeyboard.pressKey(key);
+        await nutKeyboard.pressKey(key);        
       }
       for (const key of nutKeys.reverse()) {
         await nutKeyboard.releaseKey(key);
@@ -625,9 +779,11 @@ ipcMain.handle('execute-wait-pixel-color', async (event, { x, y, colorHex, timeo
     const startTime = Date.now();
     while (Date.now() - startTime < timeoutMs) {
       const pixel = await nutScreen.pixel(x, y);
-      if (colorsMatch(pixel, targetColor)) {
+      if (colorsMatch(pixel, targetColor)) 
+      {
         console.log('Pixel color matched!');
-        return { success: true, matched: true };
+
+        return { success: true, matched: true };        
       }
       await delay(100);
     }
@@ -648,8 +804,8 @@ ipcMain.handle('execute-wait-pixel-color', async (event, { x, y, colorHex, timeo
 ipcMain.handle('execute-screenshot-region', async (event, { x, y, width, height, savePath, screenshotMode }) => {
   try {
     await loadNut();
-   console.log('dirname:'+__dirname);
-   const dirname=__dirname;
+   const dirname=process.cwd();
+
     // Generate auto path if savePath is empty
     let finalPath = savePath && savePath.trim() !== ''
       ? savePath
@@ -660,24 +816,38 @@ ipcMain.handle('execute-screenshot-region', async (event, { x, y, width, height,
 
     if (!fs.existsSync(directory)) {     fs.mkdirSync(directory, { recursive: true, mode: 0o777 });
  }
+    let image;
 
     if (screenshotMode === 'fullscreen') {
       // Full screen screenshot - pass path directly
       console.log('Taking full screen screenshot to:', finalPath);
-      const image =await nutScreen.capture(finalPath);
+       image =await nutScreen.capture(finalPath);
     } else {
       // Region screenshot (default)
       console.log(`Taking screenshot region: (${x}, ${y}) ${width}x${height}`);
-      const image = await nutScreen.captureRegion(x, y, width, height);
+       image = await nutScreen.captureRegion(x, y, width, height);
       await image.toFile(finalPath);
     }
 
+    // const jimpImage = await new Jimp({
+    //   width: image.width,
+    //   height: image.height,
+    //   data: Buffer.from(image.data) // nutScreen provides raw RGBA
+    // });
+    
+    // await jimpImage.writeAsync(finalPath); // save to disk
+
+
+
     console.log(`Screenshot saved to: ${finalPath}`);
+
+    
 
     // Copy screenshot to clipboard as image if savePath was not provided
     if (!savePath || savePath.trim() === '') {
        const { clipboard } = require('electron');
        clipboard.writeText(finalPath);
+       console.log(clipboard.readText());
     }
 
     return { success: true, path: finalPath };
@@ -692,15 +862,24 @@ ipcMain.handle('execute-screenshot-region', async (event, { x, y, width, height,
 // ===========================================
 
 ipcMain.handle('minimize-window', () => mainWindow.minimize());
-
-
-
 ipcMain.handle('maximize-window', () => {
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
   else mainWindow.maximize();
 });
 
 ipcMain.handle('close-window', () => mainWindow.close());
+
+// ===========================================
+// CLEAR QUEUES ON CLOSE HANDLER
+// ===========================================
+
+ipcMain.handle('clear-queues-on-close', async () => {
+  console.log('[MAIN] Clearing queues before app close...');
+  // The actual clearing is done in the renderer process
+  // This just confirms the request was received
+  return { success: true, message: 'Queue clear requested' };
+});
+
 // ===========================================
 // CLIPBOARD IPC HANDLERS (for FIFO message processing)
 // ===========================================
@@ -712,7 +891,7 @@ ipcMain.handle('set-clipboard-text', async (event, { text }) => {
 
 ipcMain.handle('clear-clipboard', async (event) => {
   clipboard.clear();
-  return { success: true };
+  return { success: true };  
 });
 
 // Read clipboard text
@@ -722,6 +901,7 @@ ipcMain.handle('read-clipboard-text', async (event) => {
     return { success: true, content: text };
   } catch (error) {
     console.error('Failed to read clipboard:', error);
+
     return { success: false, error: error.message };
   }
 });
@@ -733,10 +913,11 @@ ipcMain.handle('read-clipboard-text', async (event) => {
 ipcMain.handle('start-coordinate-recording', async (event) => {
   try {
     await loadNut();
+
     startCoordinateRecording();
-    
-    // Minimize window to let user click on screen
-    if (mainWindow) {
+        // Minimize window to let user click on screen
+    if (mainWindow) 
+    {
       mainWindow.minimize();
     }
     
@@ -750,12 +931,15 @@ ipcMain.handle('start-coordinate-recording', async (event) => {
 ipcMain.handle('stop-coordinate-recording', async (event) => {
   try {
     // Restore window
-    if (mainWindow) {
+    if (mainWindow) 
+    {
       mainWindow.restore();
+
       mainWindow.focus();
     }
     
     const coordinates = stopCoordinateRecording();
+
     return { success: true, coordinates };
   } catch (error) {
     console.error('Failed to stop coordinate recording:', error);
@@ -778,11 +962,11 @@ ipcMain.handle('clear-recorded-coordinates', async (event) => {
 
 ipcMain.handle('test-telegram-connection', async (event, { token, chatId }) => {
   try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/getMe`, {}, 3, 1000);
     if (!response.ok) return { success: false, error: 'Invalid bot token' };
     const botInfo = await response.json();
     if (botInfo.ok) {
-      const chatResponse = await fetch(`https://api.telegram.org/bot${token}/getChat?chat_id=${chatId}`);
+      const chatResponse = await fetchWithRetry(`https://api.telegram.org/bot${token}/getChat?chat_id=${chatId}`, {}, 3, 1000);
       if (!chatResponse.ok) return { success: false, error: 'Cannot access this chat' };
       return { success: true, botName: botInfo.result.first_name, username: botInfo.result.username };
     }
@@ -794,10 +978,10 @@ ipcMain.handle('test-telegram-connection', async (event, { token, chatId }) => {
 
 ipcMain.handle('send-telegram-message', async (event, { token, chatId, message }) => {
   try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'HTML' })
-    });
+    }, 3, 1500);
     const result = await response.json();
     if (result.ok) return { success: true, messageId: result.result.message_id };
     return { success: false, error: result.description };
@@ -810,14 +994,14 @@ ipcMain.handle('send-telegram-photo', async (event, { token, chatId, photoPath, 
   try {
   console.log("Send photo to tele");
 const fs = require("fs");
-   if (!fs.existsSync(imagePath)) {
+   if (!fs.existsSync(photoPath)) {
     throw new Error("Image file does not exist");
   }
     const formData = new FormData();
     formData.append('chat_id', chatId);
     formData.append('photo', fs.createReadStream(photoPath));
     if (caption) formData.append('caption', caption);
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: formData });
+    const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: formData }, 3, 1500);
     const result = await response.json();
     if (result.ok) return { success: true, messageId: result.result.message_id };
     return { success: false, error: result.description };
@@ -828,10 +1012,10 @@ const fs = require("fs");
 
 ipcMain.handle('get-telegram-updates', async (event, { token, chatId, offset = 0 }) => {
   try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/getUpdates`, {
+    const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/getUpdates`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ offset, limit: 100, timeout: 30 })
-    });
+    }, 3, 1000);
     const result = await response.json();
     if (result.ok) {
       const chatUpdates = result.result.filter(update => {
@@ -857,13 +1041,13 @@ ipcMain.handle('get-telegram-updates', async (event, { token, chatId, offset = 0
 
 ipcMain.handle('reply-telegram-message', async (event, { token, chatId, messageId, text }) => {
   try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text, reply_to_message_id: messageId, parse_mode: 'HTML' })
-    });
+    }, 3, 1500);
     const result = await response.json();
     if (result.ok) return { success: true, messageId: result.result.message_id };
-    return { success: false, error: result.description };
+    return { success: false, error: result.description};
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -875,7 +1059,7 @@ ipcMain.handle('execute-send-message-to-tele', async (event, { token, chatId, cu
     // Use customChatId if provided, otherwise use default chatId
     console.log("in this chat tele");
     const targetChatId = customChatId && customChatId.trim() !== '' ? customChatId : chatId;
-
+    
     if (!token || !targetChatId) {
 
     console.log("here");
@@ -910,7 +1094,6 @@ ipcMain.handle('execute-send-message-to-tele', async (event, { token, chatId, cu
       const fileBuffer = fs.readFileSync(photoPath);
       const contentType = getMimeType(photoPath);
       const blob = new Blob([fileBuffer], { type: contentType });
-
       const formData = new FormData();
       formData.append('chat_id', targetChatId);
       formData.append('photo', blob, 'photo' + getFileExtension(photoPath));
@@ -918,10 +1101,10 @@ ipcMain.handle('execute-send-message-to-tele', async (event, { token, chatId, cu
         formData.append('caption', caption);
       }
 
-      const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+      const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendPhoto`, {
         method: 'POST',
         body: formData
-      });
+      }, 3, 1500);
 
       result = await response.json();
       if (result.ok) {
@@ -949,11 +1132,11 @@ ipcMain.handle('execute-send-message-to-tele', async (event, { token, chatId, cu
 
       console.log(`Sending text to Telegram: ${message.substring(0, 50)}...`);
 
-      const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: targetChatId, text: message, parse_mode: 'HTML' })
-      });
+      }, 3, 1500);
 
       result = await response.json();
       if (result.ok) {
@@ -962,8 +1145,49 @@ ipcMain.handle('execute-send-message-to-tele', async (event, { token, chatId, cu
       }
       return { success: false, error: result.description };
     }
-  } catch (error) {
+    } catch (error) {
     console.error('Failed to send message to Telegram:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Send Error Log to Telegram
+ipcMain.handle('send-error-log', async (event, { text_error, chatId }) => {
+  try {
+    // Get stored Telegram settings
+    const token = global_log_chatToken;
+    const targetChatId = global_log_chatId;
+
+    if (!token || !targetChatId) {
+      console.log('[ERROR-LOG] Telegram not configured for error logs');
+      return { success: false, error: 'Telegram bot not connected or chat ID not set' };
+    }
+
+    // Format the error message with timestamp
+    const timestamp = new Date().toLocaleString();
+    const formattedMessage = `🚨 <b>Error Log</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `📅 <b>Time:</b> ${timestamp}\n` +
+      `📝 <b>Error:</b>\n` +
+      `<pre>${text_error}</pre>\n` +
+      `━━━━━━━━━━━━━━━━━━━━`;
+
+    console.log(`[ERROR-LOG] Sending error log to Telegram chat ${targetChatId}`);
+
+    const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: targetChatId, text: formattedMessage, parse_mode: 'HTML' })
+    }, 3, 1500);
+
+    const result = await response.json();
+    if (result.ok) {
+      console.log('[ERROR-LOG] Error log sent to Telegram successfully');
+      return { success: true, messageId: result.result.message_id };
+    }
+    return { success: false, error: result.description };
+  } catch (error) {
+    console.error('[ERROR-LOG] Failed to send error log to Telegram:', error);
     return { success: false, error: error.message };
   }
 });
@@ -987,7 +1211,8 @@ function getFileExtension(filePath) {
   return path.extname(filePath).toLowerCase() || '.jpg';
 }
 
-function getMessageType(message) {
+function getMessageType(message) 
+{
   if (message.text) return 'text';
   if (message.document) return 'document';
   if (message.photo) return 'photo';
@@ -997,7 +1222,8 @@ function getMessageType(message) {
   if (message.video) return 'video';
   if (message.contact) return 'contact';
   if (message.location) return 'location';
-  return 'unknown';
+
+  return 'unknown';  
 }
 
 // ===========================================
@@ -1006,7 +1232,9 @@ function getMessageType(message) {
 
 function hexToRgb(hex) {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+
   return result ? { r: parseInt(result[1], 16), g: parseInt(result[2], 16), b: parseInt(result[3], 16) } : null;
+
 }
 function colorsMatch(pixel, target, tolerance = 10) {
   if (!pixel || !target) return false;

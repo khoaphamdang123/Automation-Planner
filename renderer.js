@@ -57,6 +57,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Set up coordinate recording listeners
   setupCoordinateRecordingListeners();
+  
+  // ===========================================
+  // APP CLOSE / PAGE UNLOAD HANDLER
+  // ===========================================
+  
+  // Make clearAllMessageQueues globally accessible for main process calls
+  window.clearAllMessageQueues = clearAllMessageQueues;
+  
+  // Clear all queues when page is unloading (app closing)
+  window.addEventListener('beforeunload', () => {
+    console.log('[RENDERER] Page is unloading, clearing all queues...');
+    clearAllMessageQueues();
+  });
+
+  // Listen for app close event from main process
+  if (window.electronAPI && window.electronAPI.onStopAllAutoScript) {
+    window.electronAPI.onStopAllAutoScript((data) => {
+      if (data && data.reason === 'app-close') {
+        console.log('[RENDERER] App is closing, clearing queues...');
+        clearAllMessageQueues();
+      }
+    });
+  }
 });
 
 // Coordinate Recording Event Listeners
@@ -162,7 +185,7 @@ function setupCoordinateRecordingListeners() {
 // Event Listeners
 function initializeEventListeners() {
   // Navigation
-  navBtns.forEach(btn => {
+    navBtns.forEach(btn => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
 
@@ -227,9 +250,25 @@ function initializeQuickRunScenarioListeners() {
     const runBtn = e.target.closest('.qs-run-btn');
     if (runBtn) {
       e.stopPropagation();
+
+            if (!isAutomationRunning) 
+      {
+    
+    showToast('Please turn ON Automation first in the main tab', 'warning');
+
+    return;
+  }
+
+      
+      window.electronAPI.minimizeWindow();
+
+ 
       const scenarioItem = runBtn.closest('.quick-scenario-item');
+
       if (scenarioItem) {
+
         const scenarioId = parseInt(scenarioItem.dataset.id);
+
         runQuickScenario(scenarioId);
       }
     }
@@ -251,7 +290,7 @@ function initializeQuickRunScenarioListeners() {
 function runQuickScenario(scenarioId) {
   const scenario = scenarios.find(s => s.id === scenarioId);
   if (!scenario) {
-    showToast('Scenario not found', 'error');
+    showToast('Scenario not found', 'error');  
     return;
   }
 
@@ -344,7 +383,13 @@ async function startAutomation() {
     if (result.success) {
       isAutomationRunning = true;
       automationStartTime = Date.now();
-
+      
+      if(telegramMessageQueue!=null && telegramMessageQueue.length>0)
+      {
+      telegramMessageQueue=[];
+      isProcessingTelegramQueue=false;
+      showToast('Telegram message queue cleared', 'info');
+      }
       // Update UI
       automationToggle.classList.add('stop');
       automationToggle.querySelector('.btn-icon').textContent = '⏹️';
@@ -366,6 +411,42 @@ async function startAutomation() {
   }
 }
 
+// Clear all message queues (telegram and scenario queues)
+function clearAllMessageQueues() {
+  console.log('[CLEAR-QUEUES] Clearing all message queues');
+  
+  // Clear main telegram queue
+  if (telegramMessageQueue.length > 0) {
+    const count = telegramMessageQueue.length;
+    telegramMessageQueue = [];
+    console.log(`[CLEAR-QUEUES] Cleared ${count} messages from telegramMessageQueue`);
+  }
+  
+  // Clear all scenario message queues
+  let scenarioClearedCount = 0;
+  scenarios.forEach(scenario => {
+    if (scenario.messageQueue && scenario.messageQueue.length > 0) {
+      const count = scenario.messageQueue.length;
+      scenario.messageQueue = [];
+      scenarioClearedCount++;
+      console.log(`[CLEAR-QUEUES] Cleared ${count} messages from scenario "${scenario.name}"`);
+    }
+  });
+  
+  if (scenarioClearedCount > 0) {
+    console.log(`[CLEAR-QUEUES] Cleared queues from ${scenarioClearedCount} scenarios`);
+  }
+  
+  // Reset telegram processing state
+  isProcessingTelegramQueue = false;
+  currentTelegramMessage = null;
+  
+  return {
+    telegramCleared: telegramMessageQueue.length === 0,
+    scenariosCleared: scenarioClearedCount
+  };
+}
+
 async function stopAutomation() {
   try {
     const result = await window.electronAPI.stopAutomation();
@@ -381,14 +462,11 @@ async function stopAutomation() {
           window.electronAPI.clearClipboard();
           currentTelegramMessage = null;
         }
-
-        // Clear telegram message queue
-        if (telegramMessageQueue.length > 0) {
-          telegramMessageQueue = [];
-          isProcessingTelegramQueue = false;
-          showToast('Telegram message queue cleared', 'info');
-        }
       }
+
+      // Clear ALL message queues (telegram and scenarios)
+      clearAllMessageQueues();
+      showToast('All message queues cleared', 'info');
 
       // Update UI
       automationToggle.classList.remove('stop');
@@ -923,7 +1001,6 @@ function selectScenario(id) {
   // Update list selection
   document.querySelectorAll('.scenario-item').forEach(item => {
     item.classList.toggle('active', parseInt(item.dataset.id) === id);
-    
   });
 
   // Update details panel
@@ -1333,6 +1410,12 @@ function renderScenarioList() {
 // SCENARIO EXECUTION FUNCTIONS
 // ===========================================
 
+// Guards to prevent duplicate execution
+let isExecutingAction = false;
+let executingActionIndex = -1;
+let executingScenarioId = null;
+let isExecutingSubAction = false;
+
 // Start Scenario Execution
 function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
   const scenario = scenarios.find(s => s.id === scenarioId);
@@ -1368,6 +1451,9 @@ function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
       runningScenarioId = scenarioId;
       telegramRunningLoopTrigger = true;
       isRunningSubActions = true;  // Flag to indicate we're running sub-actions
+      
+      // Reset loop counter for infinite sub-action looping
+      loopIterationCount = 0;
 
       // Update UI - show stop button
       const runBtn = document.getElementById('runScenarioBtn');
@@ -1453,6 +1539,12 @@ function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
 
 // Execute Next Action in the scenario
 async function executeNextAction() {
+  // GUARD: Prevent duplicate execution
+  if (isExecutingAction) {
+    console.log('[DEBUG-EXEC] executeNextAction already in progress - skipping duplicate call');
+    return;
+  }
+
   // Check if scenario execution was stopped (by ESC or manual stop)
   if (isScenarioExecutionStopped) {
     console.log('[DEBUG-EXEC] Scenario execution was stopped - NOT executing next action');
@@ -1583,8 +1675,10 @@ async function executeNextAction() {
         // Get message from queue
         let queuedMessage = null;
         if (telegramMessageQueue.length > 0) {
+          console.log("Get message from telegram message queue");
           queuedMessage = telegramMessageQueue.shift();
         } else if (scenario.messageQueue && scenario.messageQueue.length > 0) {
+          console.log("Get message from scenario message queue");
           queuedMessage = scenario.messageQueue.shift();
         }
 
@@ -1630,12 +1724,26 @@ async function executeNextAction() {
 
   const action = scenario.actions[currentActionIndex];
 
+  console.log(`[DEBUG-EXEC] About to execute action: ${action.type} (${action.name})`);
+  console.log(`[DEBUG-EXEC] telegramSequenceInterrupted: ${telegramSequenceInterrupted}, telegramSequenceRunning: ${telegramSequenceRunning}`);
+
+  // SET GUARD: Prevent duplicate execution
+  isExecutingAction = true;
+  executingActionIndex = currentActionIndex;
+  executingScenarioId = scenario.id;
+
   // Update progress
   updateScenarioProgress(currentActionIndex, scenario.actions.length);
 
   // Execute action based on type
   try {
     await executeAction(action);
+
+    // CLEAR GUARD: Action completed
+    isExecutingAction = false;
+    executingActionIndex = -1;
+    executingScenarioId = null;
+
     console.log(`[DEBUG-EXEC-FLOW] ${scenario.name} action ${currentActionIndex} (${action.type}) completed - next index: ${currentActionIndex + 1}`);
     currentActionIndex++;
 
@@ -1659,6 +1767,10 @@ async function executeNextAction() {
     }, scenario.actionDelay || 500);
     console.log('[DEBUG-EXEC] Scheduled next action for scenario', scheduledScenarioId, 'in', scenario.actionDelay || 500, 'ms');
   } catch (error) {
+    // CLEAR GUARD: Action failed
+    isExecutingAction = false;
+    executingActionIndex = -1;
+    executingScenarioId = null;
     console.error('Action execution error:', error);
     showToast(`Error in action: ${action.name}`, 'error');
     stopScenarioExecution();
@@ -1697,6 +1809,12 @@ async function executeNextSubAction() {
   if (isScenarioExecutionStopped) {
     console.log('[DEBUG-EXEC-SUB] Sub-action execution was stopped');
     isRunningSubActions = false;
+    return;
+  }
+
+  // GUARD: Prevent duplicate sub-action execution
+  if (isExecutingSubAction) {
+    console.log('[DEBUG-EXEC-SUB] executeNextSubAction already in progress - skipping duplicate call');
     return;
   }
 
@@ -1742,13 +1860,13 @@ async function executeNextSubAction() {
 
   const subActions = scenario.subActions;
 
-  // Check if we've completed all sub-actions
+  // Check if we've completed all sub-actions - loop infinitely when no messages
   if (currentActionIndex >= subActions.length) {
-    console.log('[DEBUG-EXEC-SUB] All sub-actions completed - checking queue before looping');
+    console.log('[DEBUG-EXEC-SUB] All sub-actions completed - checking queue');
     
-    // Check queue before looping - if messages arrived, switch to main actions
+    // Check queue - if messages arrived, switch to main actions
     if (hasQueuedMessages(scenario)) {
-      console.log('[DEBUG-EXEC-SUB] Messages detected after sub-action loop - switching to main actions');
+      console.log('[DEBUG-EXEC-SUB] Messages detected - switching to main actions');
       isRunningSubActions = false;
       
       // Extract message from queue and copy to clipboard
@@ -1762,7 +1880,7 @@ async function executeNextSubAction() {
       if (queuedMessage) {
         currentTelegramMessage = queuedMessage;
         window.electronAPI.setClipboardText(queuedMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
-        console.log('[DEBUG-EXEC-SUB] Message copied to clipboard from queue');
+        console.log('[DEBUG-EXEC-SUB] Message copied to clipboard');
       }
       
       currentActionIndex = 0;
@@ -1771,13 +1889,19 @@ async function executeNextSubAction() {
       return;
     }
     
-    // Queue is empty - continue looping sub-actions
+    // Queue empty - LOOP CONTINUOUSLY from beginning (infinite loop)
     console.log('[DEBUG-EXEC-SUB] Queue empty - looping sub-actions from beginning');
     currentActionIndex = 0;
-
+    
+    // Update loop iteration counter
+    loopIterationCount++;
+    const progressContainer = document.getElementById('scenarioProgressText');
+    if (progressContainer) {
+      progressContainer.textContent = `🔁 Sub-action loop #${loopIterationCount}`;
+    }
+    
     // Schedule next iteration with delay
     telegramSequenceTimeoutId = setTimeout(() => {
-      // Safety check: Don't run if main actions should be running
       if (isRunningSubActions && !isScenarioExecutionStopped && !currentTelegramMessage) {
         executeNextSubAction();
       }
@@ -1790,12 +1914,23 @@ async function executeNextSubAction() {
   // Update progress for sub-actions
   const progressContainer = document.getElementById('scenarioProgressText');
   if (progressContainer) {
-    progressContainer.textContent = `Sub-action ${currentActionIndex + 1}/${subActions.length} (${subAction.name})`;
+    progressContainer.textContent = `🔁 Sub-action ${currentActionIndex + 1}/${subActions.length} (${subAction.name})`;
   }
 
     // Execute the sub-action
   try {
+    // SET GUARD: Prevent duplicate sub-action execution
+    isExecutingSubAction = true;
+    executingActionIndex = currentActionIndex;
+    executingScenarioId = scenario.id;
+
     await executeAction(subAction);
+
+    // CLEAR GUARD: Sub-action completed
+    isExecutingSubAction = false;
+    executingActionIndex = -1;
+    executingScenarioId = null;
+
     console.log(`[DEBUG-EXEC-SUB] Sub-action ${currentActionIndex} (${subAction.type}) completed`);
     currentActionIndex++;
 
@@ -1833,6 +1968,10 @@ async function executeNextSubAction() {
       }
     }, scenario.actionDelay || 500);
   } catch (error) {
+    // CLEAR GUARD: Sub-action failed
+    isExecutingSubAction = false;
+    executingActionIndex = -1;
+    executingScenarioId = null;
     console.error('Sub-action execution error:', error);
     showToast(`Error in sub-action: ${subAction.name}`, 'error');
     isRunningSubActions = false;
@@ -1929,12 +2068,15 @@ async function executeAction(action) {
         clickCoords = [{ x: parseInt(action.parameters.x) || 0, y: parseInt(action.parameters.y) || 0 }];
       }
 
+      console.log(`[DEBUG-CLICK] Executing mouseClick at ${JSON.stringify(clickCoords)}`);
+
       // Get delay between different coordinates
       const delayBetweenCoordsMs = parseInt(action.parameters.delayBetweenCoordsMs) || 200;
 
       // Execute click at each recorded position
       for (let i = 0; i < clickCoords.length; i++) {
         const coord = clickCoords[i];
+        console.log(`[DEBUG-CLICK] Clicking at (${coord.x}, ${coord.y})`);
         await window.electronAPI.executeMouseClick({
           x: parseInt(coord.x) || 0,
           y: parseInt(coord.y) || 0,
@@ -1951,6 +2093,51 @@ async function executeAction(action) {
       // Delay after completing all clicks
       if (action.parameters.delayAfterMs) {
         await delay(parseInt(action.parameters.delayAfterMs) || 0);
+      }
+      break;
+
+    case 'mouseHold':
+      // Handle both old format (x, y) and new format (coordinate JSON)
+      let holdCoord;
+      if (action.parameters.coordinate) {
+        console.log(`[DEBUG-HOLD] Raw coordinate param: ${action.parameters.coordinate}`);
+        holdCoord = typeof action.parameters.coordinate === 'string'
+          ? JSON.parse(action.parameters.coordinate)
+          : action.parameters.coordinate;
+        console.log(`[DEBUG-HOLD] Parsed coordinate: ${JSON.stringify(holdCoord)}`);
+      } else {
+        console.log(`[DEBUG-HOLD] No coordinate param found, using x/y fallback`);
+        holdCoord = { x: parseInt(action.parameters.x) || 0, y: parseInt(action.parameters.y) || 0 };
+      }
+
+      console.log(`[DEBUG-HOLD] Executing mouseHold at (${holdCoord.x}, ${holdCoord.y})`);
+
+      // Get parameters
+      const holdButton = action.parameters.button || 'left';
+      const holdDurationMs = parseInt(action.parameters.holdDurationMs) || 2000;
+      const delayBeforeHold = parseInt(action.parameters.delayBeforeMs) || 0;
+      const delayAfterHold = parseInt(action.parameters.delayAfterMs) || 0;
+
+      console.log(`[DEBUG-HOLD] Params: button=${holdButton}, duration=${holdDurationMs}ms, before=${delayBeforeHold}ms, after=${delayAfterHold}ms`);
+
+      // Delay before pressing button
+      if (delayBeforeHold > 0) {
+        await delay(delayBeforeHold);
+      }
+
+      // Execute hold mouse button
+      console.log(`[DEBUG-HOLD] Calling executeMouseHold API...`);
+      await window.electronAPI.executeMouseHold({
+        x: parseInt(holdCoord.x) || 0,
+        y: parseInt(holdCoord.y) || 0,
+        button: holdButton,
+        holdDurationMs: holdDurationMs
+      });
+      console.log(`[DEBUG-HOLD] executeMouseHold completed`);
+
+      // Delay after releasing button
+      if (delayAfterHold > 0) {
+        await delay(delayAfterHold);
       }
       break;
 
@@ -2001,6 +2188,7 @@ async function executeAction(action) {
     // ===========================================
     // CLIPBOARD ACTIONS
     // ===========================================
+
     case 'setClipboard':
       await window.electronAPI.executeSetClipboard({
         text: action.parameters.text
@@ -2013,7 +2201,6 @@ async function executeAction(action) {
       });
       console.log('Read clipboard result:', readResult);
       break;
-
     // ===========================================
     // WAIT / SYNCHRONIZATION ACTIONS
     // ===========================================
@@ -2027,11 +2214,14 @@ async function executeAction(action) {
     case 'waitUntilPixelColor':
       // Handle both old format (x, y) and new format (coordinate JSON)
       let pixelCoord;
+
       if (action.parameters.coordinate) {
         pixelCoord = typeof action.parameters.coordinate === 'string'
           ? JSON.parse(action.parameters.coordinate)
           : action.parameters.coordinate;
-      } else {
+      } 
+      else 
+      {
         pixelCoord = { x: parseInt(action.parameters.x) || 0, y: parseInt(action.parameters.y) || 0 };
       }
 
@@ -2068,8 +2258,8 @@ async function executeAction(action) {
         screenshotMode: 'fullscreen',
         savePath: action.parameters.savePath
       });
-      break;
 
+      break;
     // ===========================================
     // TELEGRAM ACTIONS
     // ===========================================
@@ -2098,10 +2288,49 @@ async function executeAction(action) {
 // FIFO MESSAGE QUEUE PROCESSING (Telegram Trigger)
 // ===========================================
 
+// Helper function to validate serial number
+// Returns true if content is only numbers and has length > 10
+function isValidSerialNumber(content) {
+  if (!content || typeof content !== 'string') {
+    return false;
+  }
+  
+  // Remove all non-digit characters
+  const digitsOnly = content.replace(/\D+/g, '');
+  
+  // Check if original content only contains digits AND length > 10
+  const isOnlyNumbers = /^\d+$/.test(content);
+  const hasValidLength = digitsOnly.length > 10;
+  
+  console.log(`[VALIDATE] Content: "${content}", OnlyNumbers: ${isOnlyNumbers}, DigitsLength: ${digitsOnly.length}`);
+  
+  sendErrorLogToTelegram(`Valid Serial Number:\nContent: "${content}"\nLength: ${content?.length || 0}\nDigits: ${content?.replace(/\D+/g, '').length || 0}`);
+
+
+
+  return isOnlyNumbers && hasValidLength;
+}
+
 // Add a message to the FIFO queue
 function addToTelegramQueue(message) {
+  const content = message.content || message;
+  
+  console.log('[ADD-QUEUE] Adding message:', content?.substring(0, 50));
+  
+  // Validate serial number
+  if (!isValidSerialNumber(content)) {
+    console.log('[ADD-QUEUE] Invalid serial number - not adding to queue');
+    showToast('Invalid serial number - must be only numbers with length > 10', 'error');
+    
+    // Send error log to Telegram
+    sendErrorLogToTelegram(`Invalid serial number received:\nContent: "${content}"\nLength: ${content?.length || 0}\nDigits: ${content?.replace(/\D+/g, '').length || 0}`);
+    return false;
+  }
+  
   telegramMessageQueue.push(message);
   showToast(`📥 Message queued (${telegramMessageQueue.length} pending)`, 'info');
+
+  return true;
 }
 
 // Process the next message from the FIFO queue
@@ -2196,6 +2425,12 @@ function completeScenarioExecution() {
     clearTelegramClipboard();
     currentTelegramMessage = null;
   }
+
+  // CLEAR ALL EXECUTION GUARDS
+  isExecutingAction = false;
+  isExecutingSubAction = false;
+  executingActionIndex = -1;
+  executingScenarioId = null;
 
   // Reset execution state
   currentActionIndex = 0;
@@ -2359,6 +2594,13 @@ function stopScenarioExecution() {
   telegramSequenceInterrupted = false;
   telegramRunningLoopTrigger = false;
   isRunningSubActions = false;
+
+  // CLEAR ALL EXECUTION GUARDS
+  isExecutingAction = false;
+  isExecutingSubAction = false;
+  executingActionIndex = -1;
+  executingScenarioId = null;
+
   console.log('[DEBUG-STOP] Reset telegram flags');
 
   // Kiem tra queue khi chuyen sang scenario khac
@@ -2753,6 +2995,22 @@ const ACTION_TYPES = {
       { key: 'clickCount', label: 'Click Count', type: 'number', required: true, min: 1, max: 10, default: 1, help: 'Number of times to click per coordinate' },
       { key: 'delayBetweenCoordsMs', label: 'Delay Between Coordinates (ms)', type: 'number', required: false, min: 0, default: 200, help: 'Delay between clicking different coordinates' },
       { key: 'delayAfterMs', label: 'Delay After (ms)', type: 'number', required: false, min: 0, default: 0, help: 'Delay after all clicks (milliseconds)' }
+    ]
+  },
+  mouseHold: {
+    name: 'Hold Mouse',
+    icon: '✊',
+    description: 'Press and hold mouse button for a specified duration',
+    parameters: [
+      { key: 'coordinate', label: 'Coordinates', type: 'coordinate', required: true, help: 'Click position on screen to hold' },
+      { key: 'button', label: 'Mouse Button', type: 'select', required: true, options: [
+        { value: 'left', label: 'Left Button' },
+        { value: 'right', label: 'Right Button' },
+        { value: 'middle', label: 'Middle Button' }
+      ], default: 'left' },
+      { key: 'holdDurationMs', label: 'Hold Duration (milliseconds)', type: 'number', required: true, min: 100, default: 2000, help: 'How long to hold the mouse button' },
+      { key: 'delayBeforeMs', label: 'Delay Before (ms)', type: 'number', required: false, min: 0, default: 0, help: 'Delay before pressing the button' },
+      { key: 'delayAfterMs', label: 'Delay After (ms)', type: 'number', required: false, min: 0, default: 0, help: 'Delay after releasing the button' }
     ]
   },
   // Keyboard
@@ -4287,6 +4545,34 @@ function disconnectTelegram() {
   }
 }
 
+// Send Error Log to Telegram
+async function sendErrorLogToTelegram(text_error, chatId = null) {
+  if (!telegramSettings.connected) {
+    console.log('[ERROR-LOG] Cannot send error log - Telegram not connected');
+    return { success: false, error: 'Telegram not connected' };
+  }
+
+  try {
+    console.log('[ERROR-LOG] Sending error log to Telegram...');
+
+    const result = await window.electronAPI.sendErrorLog({
+      text_error: text_error,
+      chatId: null
+    });
+
+    if (result.success) {
+      console.log('[ERROR-LOG] Error log sent successfully, messageId:', result.messageId);
+      return { success: true, messageId: result.messageId };
+    } else {
+      console.error('[ERROR-LOG] Failed to send error log:', result.error);
+      return { success: false, error: result.error };
+    }
+  } catch (error) {
+    console.error('[ERROR-LOG] Error sending error log:', error);
+    return { success: false, error: error.message };
+  }
+}
+
 // Add Notification to List
 function addNotificationToList(notification) {
   const list = document.getElementById('notificationsList');
@@ -4605,6 +4891,16 @@ async function autoTriggerTelegramScenario(message) {
   // CASE 1: Scenario is currently running
   if (runningScenarioId === telegramScenario.id) {
     console.log('[DEBUG-TEL] Scenario is running, queueing message to scenario queue');
+    
+    // Validate serial number before adding
+    const content = message.content || message;
+    if (!isValidSerialNumber(content)) {
+      console.log('[DEBUG-TEL] Invalid serial number - not adding to queue');
+      showToast('Invalid serial number - must be only numbers with length > 10', 'error');
+      sendErrorLogToTelegram(`Invalid serial number received:\nContent: "${content}"\nLength: ${content?.length || 0}`);
+      return true; // Return true to acknowledge message but don't queue it
+    }
+    
     // Initialize queue if not exists
     if (!telegramScenario.messageQueue) {
       telegramScenario.messageQueue = [];
@@ -4634,6 +4930,16 @@ async function autoTriggerTelegramScenario(message) {
       // Continue to start the telegram scenario
     } else {
       console.log('[DEBUG-TEL] Another scenario running, queueing message to scenario queue');
+      
+      // Validate serial number before adding to queue
+      const content = message.content || message;
+      if (!isValidSerialNumber(content)) {
+        console.log('[DEBUG-TEL] Invalid serial number - not adding to queue');
+        showToast('Invalid serial number - must be only numbers with length > 10', 'error');
+        sendErrorLogToTelegram(`Invalid serial number received:\nContent: "${content}"\nLength: ${content?.length || 0}`);
+        return true;
+      }
+      
       // Initialize queue if not exists
       if (!telegramScenario.messageQueue) {
         telegramScenario.messageQueue = [];
@@ -4643,6 +4949,15 @@ async function autoTriggerTelegramScenario(message) {
       showToast(`${telegramScenario.name} - Message queued (${telegramScenario.messageQueue.length} pending)`, 'info');
       return true;
     }
+  }
+
+  // Validate serial number before processing (for all paths that reach here)
+  const content = message.content || message;
+  if (!isValidSerialNumber(content)) {
+    console.log('[DEBUG-TEL] Invalid serial number - not processing message');
+    showToast('Invalid serial number - must be only numbers with length > 10', 'error');
+    sendErrorLogToTelegram(`Invalid serial number received:\nContent: "${content}"\nLength: ${content?.length || 0}`);
+    return true;
   }
 
   // Copy message to clipboard

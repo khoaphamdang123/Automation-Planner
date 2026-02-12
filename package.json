@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "description": "Automation planning app with clicks, mouse movement, and screenshots",
   "main": "main.js",
-  "scripts": {
-    "start": "electron .",
-    "build": "electron-builder"
-  },
+ "scripts": {
+  "start": "electron .",
+  "build": "electron-builder --win portable"
+},
   "keywords": [
     "automation",
     "electron",
@@ -15,31 +15,44 @@
   "author": "Your Name",
   "license": "MIT",
   "devDependencies": {
+    "axios": "^1.13.5",
     "electron": "^28.0.0",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "electron-builder-squirrel-windows": "^24.13.3"
   },
   "dependencies": {
+    "axios": "^1.13.5",
     "@nut-tree-fork/nut-js": "^4.2.6",
     "uiohook-napi": "^1.5.4"
   },
   "build": {
     "appId": "com.automation.planner",
     "productName": "Automation Planner",
+    "asar": true,
+   "asarUnpack": [
+  "**/*.node",
+  "**/uiohook-napi/**",
+  "**/@nut-tree-fork/**"
+],
     "win": {
+       "target": [
+    {
       "target": "nsis",
-      "icon": "icon.ico"
+      "arch": ["x64"]
+    }
+  ],
+      "icon": "assets/robot.ico",
+      "artifactName": "${productName}-${version}-Portable.exe"
     },
-    "nsis": {
-      "oneClick": true,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": false
+    "portable": {
+      "requestExecutionLevel": "user"
     },
     "files": [
       "**/*",
-      "!node_modules/*"
+      "!distt/*"
     ],
     "directories": {
-      "output": "dist"
+      "output": "distt"
     }
   }
 }

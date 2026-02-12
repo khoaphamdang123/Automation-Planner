@@ -1,7 +1,29 @@
 // Script để lấy chatID từ Telegram Bot
 // Chạy: node get_chat_id.js
 
+// const BOT_TOKEN = '8477917299:AAEUmLezZvIt5fTJPbH2NENxnlDz70APfcU';
 const BOT_TOKEN = '8477917299:AAEUmLezZvIt5fTJPbH2NENxnlDz70APfcU';
+
+
+let lastBotMessage = null; // store last sent message info
+
+ async function deleteLastBotMessage() {
+  if (!lastBotMessage) {
+    console.log("No message to delete");
+    return;
+  }
+var TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+var chat_id = '-4281066037';
+
+  await axios.post(`${TELEGRAM_API}/deleteMessage`, {
+    chat_id: chat_id,
+    message_id: lastBotMessage.messageId,
+  });
+
+  // Clear after delete
+  lastBotMessage = null;
+}
 
 async function getChatId() {
   try {
@@ -10,7 +32,8 @@ async function getChatId() {
     const response = await fetch(
       `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates`
     );
-    const data = await response.json();
+
+    const data = await response.json();    
 
     if (data.ok && data.result.length > 0) {
       console.log('\n📋 Danh sách chats:\n');
@@ -21,7 +44,7 @@ async function getChatId() {
           console.log(`${index + 1}. ChatID: ${chat.id}`);
           console.log(`   Tên: ${chat.title || chat.first_name}`);
           console.log(`   Loại: ${chat.type}`);
-          console.log('   ---');
+          console.log('---');
         }
         if (update.my_chat_member) {
           const chat = update.my_chat_member.chat;
@@ -33,6 +56,7 @@ async function getChatId() {
       });
 
       console.log('\n✅ Hoàn thành! Copy ChatID bạn cần.');
+
     } else {
       console.log('❌ Không có updates. Hãy:');
       console.log('   1. Thêm bot vào nhóm cần lấy ID');

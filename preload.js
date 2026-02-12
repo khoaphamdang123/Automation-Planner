@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   minimizeWindow: () => ipcRenderer.invoke('minimize-window'),
   maximizeWindow: () => ipcRenderer.invoke('maximize-window'),
   closeWindow: () => ipcRenderer.invoke('close-window'),
+  
+  // Clear all queues on app close
+  clearQueuesOnClose: () => ipcRenderer.invoke('clear-queues-on-close'),
 
   // ===========================================
   // NUT.JS ACTION HANDLERS
@@ -27,6 +30,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Mouse Actions
   executeMouseMove: (params) => ipcRenderer.invoke('execute-mouse-move', params),
   executeMouseClick: (params) => ipcRenderer.invoke('execute-mouse-click', params),
+  executeMouseHold: (params) => ipcRenderer.invoke('execute-mouse-hold', params),
 
   // Keyboard Actions
   executeTypeText: (params) => ipcRenderer.invoke('execute-type-text', params),
@@ -64,6 +68,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTelegramUpdates: (data) => ipcRenderer.invoke('get-telegram-updates', data),
   replyTelegramMessage: (data) => ipcRenderer.invoke('reply-telegram-message', data),
   executeSendMessageToTele: (data) => ipcRenderer.invoke('execute-send-message-to-tele', data),
+  sendErrorLog: (data) => ipcRenderer.invoke('send-error-log', data),
 
   // Coordinate Recording
   startCoordinateRecording: () => ipcRenderer.invoke('start-coordinate-recording'),

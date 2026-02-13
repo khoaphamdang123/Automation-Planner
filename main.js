@@ -215,6 +215,7 @@ async function startCoordinateRecording() {
   if (isRecordingCoordinates) return;
 
   isRecordingCoordinates = true;
+  
   recordedCoordinates = [];
 
   console.log('Starting coordinate recording (uiohook)...');

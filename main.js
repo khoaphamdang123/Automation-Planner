@@ -222,7 +222,8 @@ async function startCoordinateRecording() {
 
   await loadNut();
 
-  if (mainWindow) {
+  if (mainWindow) 
+  {
     mainWindow.minimize();
   }
 

@@ -49,10 +49,10 @@
     },
     "files": [
       "**/*",
-      "!distt/*"
+      "!dist/*"
     ],
     "directories": {
-      "output": "disttt"
+      "output": "dist"
     }
   }
 }

@@ -14,7 +14,13 @@ async function fetchWithRetry(url, options, maxRetries = 3, baseDelay = 1000) {
       const response = await fetch(url, options);
       return response;
     } catch (error) {
+
+   await sendErrorLog(`Fetch with retry failed ${attempt + 1}/${maxRetries}: `+error.message + ' on url: '+url + ' with options: '+JSON.stringify(options));
+
       lastError = error;
+      
+      
+
       console.log(`[RETRY] Fetch attempt ${attempt + 1}/${maxRetries} failed: ${error.message}`);
       
       if (attempt < maxRetries - 1) {
@@ -29,7 +35,6 @@ async function fetchWithRetry(url, options, maxRetries = 3, baseDelay = 1000) {
   throw lastError;
 }
 
-// RobotJS imports for desktop automation (fallback if nut.js fork fails)
 let robotjs;
 
 // Nut.js fork imports
@@ -43,6 +48,8 @@ let nutWindow;
 const global_log_chatId='-1003105268082';
 
 const global_log_chatToken = '8477917299:AAEUmLezZvIt5fTJPbH2NENxnlDz70APfcU';
+
+const app_is_turned_off='Không thể auto tra cứu do phần mềm Auto MBCCS đã bị thu nhỏ/ẩn hoặc tắt';
 
 async function loadNut() {
   if (!nut) {
@@ -86,15 +93,13 @@ let lastMouseState = { x: 0, y: 0, lastMoveTime: 0 };
 const { uIOhook,UiohookMouse } = require('uiohook-napi');
 
 let mouseHookStarted = false;
+
 let keyboardHookStarted = false;
-
-
 // ===========================================
 // GLOBAL KEYBOARD LISTENER FOR RECORDING STOP
 // ===========================================
 
 function setupKeyboardHook() {
-console.log('ini hite');
   if (keyboardHookStarted) {
     console.log('>>> Keyboard hook already started, skipping...');
     return;
@@ -134,6 +139,8 @@ console.log('ini hite');
       
       // Stop recording
       const coordinates = stopCoordinateRecording();
+
+    
       
       // Restore window
       if (mainWindow) {
@@ -157,7 +164,52 @@ console.log('ini hite');
   
   keyboardHookStarted = true;
 }
-    
+  
+
+async function sendErrorLog(text_error)
+{
+
+     try {
+      const token = global_log_chatToken;
+  
+      const targetChatId = global_log_chatId;
+  
+      if (!token || !targetChatId) {
+        console.log('[ERROR-LOG] Telegram not configured for error logs');
+        return { success: false, error: 'Telegram bot not connected or chat ID not set' };
+      }
+  
+      const timestamp = new Date().toLocaleString();
+  
+      const formattedMessage = `<b>Check Error Log</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `📅 <b>Time:</b> ${timestamp}\n` +
+        `📝 <b>Context:</b>\n` +
+        `<pre>${text_error}</pre>\n` +
+        `━━━━━━━━━━━━━━━━━━━━`;
+  
+      console.log(`[ERROR-LOG] Sending error log to Telegram chat ${targetChatId}`);
+  
+      const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: targetChatId, text: formattedMessage, parse_mode: 'HTML' })
+      }, 5, 1500);
+  
+      const result = await response.json();
+      if (result.ok) {
+        console.log('[ERROR-LOG] Error log sent to Telegram successfully');
+        return { success: true, messageId: result.result.message_id };
+      }
+      return { success: false, error: result.description };
+    } catch (error) {
+      console.error('[ERROR-LOG] Failed to send checkUpdate log to Telegram:', error);
+      return { success: false, error: error.message };
+    }
+ 
+  }
+
+
 
 function checkOnline()
 {
@@ -356,20 +408,20 @@ app.whenReady().then(createWindow);
 
 app.on('before-quit', async (event) => {
   console.log('[APP] App is about to quit, clearing queues...');
-  
-  // Signal renderer to clear queues and stop automation
+
+  // Signal renderer to stop automation and clear queues
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
-      // Emit event to renderer to stop automation and clear queues
+      // Send event to renderer to stop automation
       mainWindow.webContents.send('stop-all-auto-script', { reason: 'app-close' });
-      
-      // Give renderer time to process the event and clear queues
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      // Also try direct call as backup
-      await mainWindow.webContents.executeJavaScript('clearAllMessageQueues();');
+
+      // Wait a bit for renderer to process
+      await new Promise(resolve => setTimeout(resolve, 300));
+
+      // Call the clear queues function directly via IPC
+      await mainWindow.webContents.executeJavaScript('if (typeof clearAllMessageQueues === "function") { clearAllMessageQueues(); console.log("[APP-CLOSE] Queues cleared via direct JS"); }');
     } catch (error) {
-      console.error('[APP] Failed to clear queues on close:', error);
+      console.error('[APP] Error during cleanup:', error);
     }
   }
 });
@@ -918,10 +970,12 @@ ipcMain.handle('close-window', () => mainWindow.close());
 // ===========================================
 
 ipcMain.handle('clear-queues-on-close', async () => {
+
   console.log('[MAIN] Clearing queues before app close...');
   // The actual clearing is done in the renderer process
   // This just confirms the request was received
   return { success: true, message: 'Queue clear requested' };
+  
 });
 
 // ===========================================
@@ -934,7 +988,13 @@ ipcMain.handle('set-clipboard-text', async (event, { text }) => {
 });
 
 ipcMain.handle('clear-clipboard', async (event) => {
+  console.log("read text:"+clipboard.readText());
+  console.log("clear clipboard");
   clipboard.clear();
+  setTimeout(() => {
+    console.log("Clipboard content after clearing: " + clipboard.readText());
+  }, 100); // 100ms delay
+  
   return { success: true };  
 });
 
@@ -1025,7 +1085,7 @@ ipcMain.handle('send-telegram-message', async (event, { token, chatId, message }
     const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'HTML' })
-    }, 3, 1500);
+    }, 5, 1500);
     const result = await response.json();
     if (result.ok) return { success: true, messageId: result.result.message_id };
     return { success: false, error: result.description };
@@ -1089,7 +1149,7 @@ ipcMain.handle('reply-telegram-message', async (event, { token, chatId, messageI
     const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text, reply_to_message_id: messageId, parse_mode: 'HTML' })
-    }, 3, 1500);
+    }, 5, 1500);
     const result = await response.json();
     if (result.ok) return { success: true, messageId: result.result.message_id };
     return { success: false, error: result.description};
@@ -1102,13 +1162,26 @@ ipcMain.handle('reply-telegram-message', async (event, { token, chatId, messageI
 ipcMain.handle('execute-send-message-to-tele', async (event, { token, chatId, customChatId, messageType, text, caption }) => {
   try {
     // Use customChatId if provided, otherwise use default chatId
-    console.log("in this chat tele");
-    const targetChatId = customChatId && customChatId.trim() !== '' ? customChatId : chatId;
-    
-    if (!token || !targetChatId) {
+    console.log("[TELEGRAM-SEND] Action triggered");
+    console.log("[TELEGRAM-SEND] token exists:", !!token);
+    console.log("[TELEGRAM-SEND] chatId:", chatId);
+    console.log("[TELEGRAM-SEND] customChatId:", customChatId);
 
-    console.log("here");
-      return { success: false, error: 'Telegram bot not connected or chat ID not set' };
+    await sendErrorLog(`Action send telegram message has been invoked`);
+
+
+    const targetChatId = customChatId && customChatId.trim() !== '' ? customChatId : chatId;
+
+    console.log("[TELEGRAM-SEND] targetChatId:", targetChatId);
+
+    if (!token) {
+      console.log("[TELEGRAM-SEND] Error: No token provided");
+      return { success: false, error: 'Telegram bot token not set' };
+    }
+
+    if (!targetChatId) {
+      console.log("[TELEGRAM-SEND] Error: No target chat ID");
+      return { success: false, error: 'Chat ID not set' };
     }
 
     const { clipboard } = require('electron');
@@ -1149,11 +1222,14 @@ ipcMain.handle('execute-send-message-to-tele', async (event, { token, chatId, cu
       const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendPhoto`, {
         method: 'POST',
         body: formData
-      }, 3, 1500);
+      }, 5, 1500);
 
       result = await response.json();
       if (result.ok) {
         console.log('Photo sent to Telegram successfully');
+
+       await  sendErrorLog(`Photo sent successfully to Telegram:`+JSON.stringify(result));
+
         // Delete the local image file after successful send
         try {
           fs.unlinkSync(photoPath);
@@ -1163,6 +1239,15 @@ ipcMain.handle('execute-send-message-to-tele', async (event, { token, chatId, cu
         }
         return { success: true, messageId: result.result.message_id };
       } else {
+        try {
+          fs.unlinkSync(photoPath);
+
+          await sendErrorLog(`Image sent failed to Telegram:`+JSON.stringify(result));
+
+          console.log('Image deleted successfully:', photoPath);
+        } catch (deleteError) {
+          console.error('Failed to delete image:', deleteError.message);
+        }
         console.log('Photo sent to Telegram failed:'+result.description);
         return { success: false, error: result.description };
       }
@@ -1172,25 +1257,44 @@ ipcMain.handle('execute-send-message-to-tele', async (event, { token, chatId, cu
       const message = text || clipboard.readText();
 
       if (!message || message.trim() === '') {
+
+        const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: targetChatId, text: app_is_turned_off, parse_mode: 'HTML' })
+        }, 5, 1500);
+  
+
         return { success: false, error: 'Message content is empty' };
       }
 
       console.log(`Sending text to Telegram: ${message.substring(0, 50)}...`);
 
+      console.log(`[TELEGRAM-SEND] API URL: https://api.telegram.org/bot${token}/sendMessage`);
+      console.log(`[TELEGRAM-SEND] Request body:`, JSON.stringify({ chat_id: targetChatId, text: message, parse_mode: 'HTML' }));
+
       const response = await fetchWithRetry(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: targetChatId, text: message, parse_mode: 'HTML' })
-      }, 3, 1500);
+      }, 5, 1500);
 
       result = await response.json();
+      console.log(`[TELEGRAM-SEND] Response:`, result);
+
       if (result.ok) {
+        await sendErrorLog(`Message sent successfully to Telegram:`+JSON.stringify(result));
         console.log('Text sent to Telegram successfully');
         return { success: true, messageId: result.result.message_id };
       }
+
+      console.log(`[TELEGRAM-SEND] Error from Telegram:`, result.description);
+      await sendErrorLog(`Message sent failed to Telegram:`+JSON.stringify(result));
+
       return { success: false, error: result.description };
     }
     } catch (error) {
+      await sendErrorLog(`Message or photo failed to send to chatId:`+error.message);
     console.error('Failed to send message to Telegram:', error);
     return { success: false, error: error.message };
   }

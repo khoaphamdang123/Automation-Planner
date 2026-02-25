@@ -361,8 +361,10 @@ function switchTab(tabName) {
 // Automation Toggle
 function toggleAutomation() {
   if (isAutomationRunning) {
+  sendErrorLogToTelegram('Automation has been stopped');
     stopAutomation();
   } else {
+    sendErrorLogToTelegram('Automation has been started');
     startAutomation();
   }
 }
@@ -396,6 +398,9 @@ window.electronAPI.onStopAllAutoScript(()=>{
     console.log('[ESC] Stopping telegram loop trigger');
     telegramRunningLoopTrigger = false;
   }
+
+  // Clear all message queues
+  clearAllMessageQueues();
 });
   
 async function startAutomation() {
@@ -1469,6 +1474,9 @@ function startScenarioExecution(scenarioId, triggeredByTelegram = false) {
       console.log('[DEBUG-START] Queue empty - starting sub-actions while waiting');
       showToast(`${scenario.name} - Queue empty, running sub-actions...`, 'info');
 
+      // Create a fresh AbortController for sub-actions delays
+      createDelayAbortController();
+
       // Set running state for main scenario
       runningScenarioId = scenarioId;
       telegramRunningLoopTrigger = true;
@@ -1632,9 +1640,12 @@ async function executeNextAction() {
 
         // Lay message tu queue
         const queuedMessage = telegramMessageQueue.shift();
+        
         currentTelegramMessage = queuedMessage;
+        
         try {
           await window.electronAPI.setClipboardText(queuedMessage.content);
+          console.log("Message copied to clipboard 1");
         } catch (error) {
           console.error('Failed to copy message to clipboard:', error);
         }
@@ -1720,6 +1731,10 @@ async function executeNextAction() {
         if (hasSubActions) {
           console.log('[DEBUG-EXEC] Queue empty - switching to sub-actions');
           showToast(`${scenario.name} - Queue empty, running sub-actions...`, 'info');
+
+          // Create a fresh AbortController for sub-actions delays
+          // This ensures delays work correctly after switching from main actions
+          createDelayAbortController();
 
           // Switch to sub-actions
           isRunningSubActions = true;
@@ -1983,14 +1998,21 @@ async function executeNextSubAction() {
     executingScenarioId = null;
 
     console.log(`[DEBUG-EXEC-SUB] Sub-action ${currentActionIndex} (${subAction.type}) completed`);
+    
     currentActionIndex++;
-
     // AFTER completing sub-action: Check queue
     const hasQueuedForProcessing = hasQueuedMessagesForProcessing(scenario);
 
     if (hasQueuedForProcessing) {
       // Messages arrived - switch to main actions
       console.log('[DEBUG-EXEC-SUB] Messages detected in queue - switching to main actions');
+
+      // Clear any pending timeout to prevent duplicate sub-action execution
+      if (telegramSequenceTimeoutId) {
+        clearTimeout(telegramSequenceTimeoutId);
+        telegramSequenceTimeoutId = null;
+      }
+
       isRunningSubActions = false;
 
       // Get next queued message
@@ -2262,10 +2284,16 @@ console.log('action type:'+action.type);
       });
       console.log('Read clipboard result:', readResult);
       break;
+
+    case 'clearClipboard':
+      await window.electronAPI.clearClipboard();
+      console.log('Clipboard cleared');
+      break;
+
     case 'pasteClipboard':
-    await window.electronAPI.executePasteClipboard();
-    console.log('Paste clipboard result:');
-    break
+      await window.electronAPI.executePasteClipboard();
+      break;
+
     // ===========================================
     // WAIT / SYNCHRONIZATION ACTIONS
     // ===========================================
@@ -2333,7 +2361,14 @@ console.log('action type:'+action.type);
         const messageType = action.parameters.messageType || 'text';
         const caption = action.parameters.caption || '';
 
-        await window.electronAPI.executeSendMessageToTele({
+        // Validate settings first
+        if (!telegramSettings.botToken || !telegramSettings.chatId) {
+          console.error('[TELEGRAM] Bot token or chat ID not configured');
+          showToast('Telegram: Bot token or chat ID not configured', 'error');
+          break;
+        }
+
+        const result = await window.electronAPI.executeSendMessageToTele({
           token: telegramSettings.botToken,
           chatId: telegramSettings.chatId,
           customChatId: action.parameters.chatId,
@@ -2341,6 +2376,13 @@ console.log('action type:'+action.type);
           text: action.parameters.text,
           caption
         });
+
+        if (result && result.success) {
+          console.log('[TELEGRAM] Message sent successfully');
+        } else {
+          console.error('[TELEGRAM] Failed to send message:', result?.error);
+          showToast(`Telegram: ${result?.error || 'Failed to send message'}`, 'error');
+        }
       }
       break;
 
@@ -2365,14 +2407,16 @@ function isValidSerialNumber(content) {
   // Check if original content only contains digits AND length > 10
   const isOnlyNumbers = /^\d+$/.test(content);
   
-  const hasValidLength = digitsOnly.length > 10;
+  const hasValidLength = digitsOnly.length > 10 && digitsOnly.length < 16;
   
   if(hasValidLength)
   {
-  console.log(`[VALIDATE] Content: "${content}", OnlyNumbers: ${isOnlyNumbers}, DigitsLength: ${digitsOnly.length}`);
-  }
+  console.log(`[VALIDATE] Content: "${content}", OnlyNumbers: ${isOnlyNumbers}, DigitsLength: ${digitsOnly.length}`);  
+  
+  sendErrorLogToTelegram(`[VALIDATE] Content: "${content}",Regex Value:${digitsOnly} ,OnlyNumbers: ${isOnlyNumbers}, DigitsLength: ${digitsOnly.length}`);
 
-  sendErrorLogToTelegram(`Valid Serial Number:\nContent: "${content}"\nLength: ${content?.length || 0}\nDigits: ${content?.replace(/\D+/g, '').length || 0}`);
+}
+
 
   return isOnlyNumbers && hasValidLength;
 }
@@ -2388,10 +2432,10 @@ function addToTelegramQueue(message) {
     console.log('[ADD-QUEUE] Invalid serial number - not adding to queue');
     showToast('Invalid serial number - must be only numbers with length > 10', 'error');
 
-    // Send error log to Telegram
     sendErrorLogToTelegram(`Invalid serial number received:\nContent: "${content}"\nLength: ${content?.length || 0}\nDigits: ${content?.replace(/\D+/g, '').length || 0}`);
     return false;
   }
+  
 
   const telegramScenario = scenarios.find(s =>
     (s.triggerByTelegram || s.telegramLoopTrigger) &&
@@ -2531,13 +2575,18 @@ function createDelayAbortController() {
 // and the sub-action will be stopped immediately to run main action
 function delay(ms, options = {}) {
   const signal = delayAbortController?.signal;
-  
+
   // If we have an abort controller, use interruptible delay
   if (signal) {
     return interruptibleDelay(ms, signal).then(() => {
       // Delay completed normally
     }).catch((error) => {
       if (error.message === 'Delay aborted') {
+        // Check if this was due to stop button click
+        if (isScenarioExecutionStopped) {
+          console.log('[DELAY] Stopped - not continuing');
+          throw new Error('Delay stopped by user');
+        }
         // Signal that delay was interrupted - resolve normally to allow code to continue
         console.log('[DELAY] Interrupted by new Telegram message');
         return;
@@ -2619,6 +2668,7 @@ function completeScenarioExecution() {
       // Copy message to clipboard
       currentTelegramMessage = nextMessage;
       window.electronAPI.setClipboardText(nextMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
+      console.log("Message copied to clipboard 2");
       // Restart the scenario
       setTimeout(async () => {
         await startScenarioExecution(scenario.id, true);
@@ -2672,7 +2722,7 @@ function completeScenarioExecution() {
       const nextMessage = parentScenario.messageQueue.shift();
       currentTelegramMessage = nextMessage;
       window.electronAPI.setClipboardText(nextMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
-
+      console.log("Message copied to clipboard 3");
       showToast(`${parentScenario.name} - Message from queue!`, 'info');
       showRunningScenarioBanner(parentScenario);
 
@@ -2691,7 +2741,7 @@ function completeScenarioExecution() {
         const nextMessage = telegramMessageQueue.shift();
         currentTelegramMessage = nextMessage;
         window.electronAPI.setClipboardText(nextMessage.content).catch(err => console.error('Failed to copy to clipboard:', err));
-
+        console.log("Message copied to clipboard 4");
         showToast(`${parentScenario?.name || 'Scenario'} - Message from queue!`, 'info');
         showRunningScenarioBanner(parentScenario);
         executeNextAction();
@@ -2747,6 +2797,9 @@ function stopScenarioExecution() {
     clearTimeout(telegramSequenceTimeoutId);
     telegramSequenceTimeoutId = null;
   }
+
+  // Abort any ongoing delays to stop sub-actions immediately
+  createDelayAbortController();
 
   // Reset telegram flags
   telegramSequenceRunning = false;
@@ -3225,6 +3278,12 @@ const ACTION_TYPES = {
   description:'Paste Clipboard from clipboard',
    parameters: [
     ]
+  },
+  clearClipboard: {
+    name: 'Clear Clipboard',
+    icon: '🗑️',
+    description: 'Clear the current clipboard content',
+    parameters: []
   },
   // Wait / Synchronization
   waitUntilClipboardChanges: {
@@ -5092,9 +5151,19 @@ async function autoTriggerTelegramScenario(message) {
       // Validate serial number
       const content = message.content || message;
       if (!isValidSerialNumber(content)) {
-        console.log('[DEBUG-TEL] Invalid serial number - not processing message');
-        showToast('Invalid serial number - must be only numbers with length > 10', 'error');
+        console.log('[DEBUG-TEL] Invalid serial number - resuming sub-actions');
+        showToast('Invalid serial number - must be only numbers with length > 10 and < 16', 'error');
         sendErrorLogToTelegram(`Invalid serial number received:\nContent: "${content}"\nLength: ${content?.length || 0}`);
+        // Reset flags to resume sub-actions instead of stopping
+        isRunningSubActions = true;
+        isExecutingSubAction = false;
+        telegramSequenceInterrupted = false;
+
+        // Resume sub-actions from where we left off
+        setTimeout(() => {
+          executeNextSubAction();
+        }, 500);
+
         return true;
       }
       
@@ -5128,7 +5197,7 @@ async function autoTriggerTelegramScenario(message) {
       console.log('[DEBUG-TEL] Invalid serial number - not adding to queue');
       showToast('Invalid serial number - must be only numbers with length > 10', 'error');
       sendErrorLogToTelegram(`Invalid serial number received:\nContent: "${content}"\nLength: ${content?.length || 0}`);
-      return true; // Return true to acknowledge message but don't queue it
+      return true; 
     }
     
     // Initialize queue if not exists
